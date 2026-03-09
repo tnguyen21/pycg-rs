@@ -1100,11 +1100,9 @@ fn test_accuracy_chained_call_enclosing_func_tracked() {
 }
 
 /// Return-value propagation: `self.to_A()` returns an `A` instance.
-/// The worklist propagation closes this for simple factory cases but the
-/// method-call chain through `self.to_A()` does not yet propagate through
-/// the ValueSet binding model (regression after ValueSet rebase).
+/// `get_a_via_A` calls `test_func1(self.to_A().b.a)` — the chain head
+/// `self.to_A()` must resolve to the `A` class so the `A` uses-edge exists.
 #[test]
-#[ignore = "GAP: attribute access on method-call result (self.to_A().b) not resolved after ValueSet rebase"]
 fn test_accuracy_chained_call_deep_chain() {
     let cg = make_submodule_graph();
     assert!(
@@ -1155,6 +1153,74 @@ fn test_accuracy_higher_order_assigned_return() {
     assert!(
         has_uses_edge(&cg, "call_returned_fn", "add_nums"),
         "call_returned_fn should use add_nums via get_adder() return-value propagation"
+    );
+}
+
+// -------------------------------------------------------------------
+// Direct call-result attribute resolution (INV-1 for chained calls)
+//
+// Tests that `make().method()` resolves correctly — no intermediate
+// variable binding needed.  Covers the `get_obj_ids_for_expr` fix for
+// Expr::Call that propagates return types for non-builtin calls.
+// -------------------------------------------------------------------
+
+#[test]
+fn test_accuracy_direct_chain_call_tracked() {
+    // direct_chain_caller() calls make() — uses edge must exist.
+    let cg = make_single_fixture_graph("accuracy_chained_call.py");
+    assert!(
+        has_uses_edge(&cg, "direct_chain_caller", "make"),
+        "direct_chain_caller should use make (direct call)"
+    );
+}
+
+#[test]
+fn test_accuracy_direct_chain_method_resolved() {
+    // make().render() — render must be reachable via make()'s return type.
+    let cg = make_single_fixture_graph("accuracy_chained_call.py");
+    assert!(
+        has_uses_edge(&cg, "direct_chain_caller", "render"),
+        "direct_chain_caller should use render via make() return-type propagation"
+    );
+}
+
+// -------------------------------------------------------------------
+// Multi-return propagation (INV-2: all candidates preserved at call site)
+//
+// Tests that `choose(flag)` returning either A() or B() causes BOTH
+// A.method and B.method to be reachable at `obj = choose(flag); obj.method()`.
+// -------------------------------------------------------------------
+
+#[test]
+fn test_accuracy_multi_return_caller_uses_choose() {
+    // multi_return_caller calls choose — direct call edge must exist.
+    let cg = make_single_fixture_graph("accuracy_multi_return.py");
+    assert!(
+        has_uses_edge(&cg, "multi_return_caller", "choose"),
+        "multi_return_caller should use choose (direct call)"
+    );
+}
+
+#[test]
+fn test_accuracy_multi_return_both_methods_reachable() {
+    // choose(flag) returns A() or B(); both A.method and B.method must be used.
+    let cg = make_single_fixture_graph("accuracy_multi_return.py");
+    let caller_ids = find_nodes_by_name(&cg, "multi_return_caller");
+    let method_nodes: Vec<usize> = find_nodes_by_name(&cg, "method")
+        .into_iter()
+        .filter(|&id| {
+            caller_ids.iter().any(|&cid| {
+                cg.uses_edges
+                    .get(&cid)
+                    .is_some_and(|targets| targets.contains(&id))
+            })
+        })
+        .collect();
+    assert!(
+        method_nodes.len() >= 2,
+        "multi_return_caller should use method from both A and B (multi-return propagation), \
+         found {} method node(s)",
+        method_nodes.len()
     );
 }
 

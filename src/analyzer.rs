@@ -849,10 +849,29 @@ impl CallGraph {
             }
             Expr::Call(c) => {
                 if let Some(id) = self.resolve_builtins(c) {
-                    vec![id]
-                } else {
-                    vec![]
+                    return vec![id];
                 }
+                // For non-builtin calls, resolve the callee and look up return types
+                // so that chained attribute access like `make().method()` can proceed.
+                let func_ids = self.get_obj_ids_for_expr(&c.func);
+                let mut results = Vec::new();
+                for &func_id in &func_ids {
+                    // Class instantiation: the class node is the "instance type".
+                    if self.class_base_ast_info.contains_key(&func_id) {
+                        if !results.contains(&func_id) {
+                            results.push(func_id);
+                        }
+                    }
+                    // Function call: propagate all statically-known return values.
+                    if let Some(ret_ids) = self.function_returns.get(&func_id).cloned() {
+                        for ret_id in ret_ids {
+                            if !results.contains(&ret_id) {
+                                results.push(ret_id);
+                            }
+                        }
+                    }
+                }
+                results
             }
             _ => vec![],
         }
@@ -1490,6 +1509,30 @@ impl CallGraph {
             // Fallback: visit RHS once and bind all targets to that value.
             let value_node = self.visit_expr(rhs, line_index);
             self.analyze_binding_simple(target, value_node, line_index);
+
+            // For Call RHS, visit_expr collapses multiple return candidates to
+            // a single `first_ret`.  Propagate all remaining return types into
+            // the target binding so multi-return functions keep every plausible
+            // type in the variable's ValueSet (INV-2).
+            if let Expr::Call(call) = rhs {
+                let extra_rets: Vec<NodeId> = {
+                    let func_cands = self.get_obj_ids_for_expr(&call.func);
+                    let mut all_rets = Vec::new();
+                    for &fid in &func_cands {
+                        if let Some(rets) = self.function_returns.get(&fid).cloned() {
+                            for ret_id in rets {
+                                if Some(ret_id) != value_node && !all_rets.contains(&ret_id) {
+                                    all_rets.push(ret_id);
+                                }
+                            }
+                        }
+                    }
+                    all_rets
+                };
+                for ret_id in extra_rets {
+                    self.analyze_binding_simple(target, Some(ret_id), line_index);
+                }
+            }
         }
     }
 
@@ -2037,6 +2080,11 @@ impl CallGraph {
                 }
 
                 if found_any {
+                    // Always visit the value expression for side-effect uses edges
+                    // even when type resolution succeeded.  Without this, chained
+                    // calls like `self.to_A().b` would resolve the type of the call
+                    // result but never emit the uses edge to `to_A` itself.
+                    self.visit_expr(&node.value, line_index);
                     return first_result;
                 }
             }
@@ -2093,25 +2141,45 @@ impl CallGraph {
                 return func_node; // class node == instance type
             }
 
-        // For function calls with known return types, propagate the return value
-        // so that callers can resolve attributes on the returned object.
-        // Pick the first known return value (deterministic via sorted iteration
-        // isn't needed — any concrete return type beats None).
-        let return_type: Option<NodeId> = func_node.and_then(|fid| {
-            self.function_returns.get(&fid).and_then(|s| s.iter().next().copied())
-        });
-        if let Some(ret_id) = return_type {
-            let from_node = self.get_node_of_current_namespace();
-            // Emit a uses edge from the caller to the return type so the
-            // call graph reflects this indirect dependency.
-            if self.add_uses_edge(from_node, ret_id) {
-                info!(
-                    "New edge added for Use from {} to {} (return-value propagation)",
-                    self.nodes_arena[from_node].get_name(),
-                    self.nodes_arena[ret_id].get_name()
-                );
+        // Collect all possible function node candidates for return-type
+        // propagation.  `visit_expr` may return a placeholder when the callee
+        // is reached via a sentinel-bound `self` parameter (e.g.
+        // `self.to_A()` returns a placeholder instead of the real `to_A`
+        // method node).  `get_obj_ids_for_expr` does pure type resolution and
+        // can find the concrete callee that `visit_expr` misses.
+        let func_candidates: Vec<NodeId> = {
+            let mut cs = self.get_obj_ids_for_expr(&node.func);
+            if let Some(fn_id) = func_node {
+                if !cs.contains(&fn_id) {
+                    cs.push(fn_id);
+                }
             }
-            return Some(ret_id);
+            cs
+        };
+
+        // For function calls with known return types, propagate all return
+        // candidates so that callers can resolve attributes on the returned
+        // object and multi-return call sites don't under-approximate.
+        let from_node = self.get_node_of_current_namespace();
+        let mut first_ret: Option<NodeId> = None;
+        for &fid in &func_candidates {
+            if let Some(ret_ids) = self.function_returns.get(&fid).cloned() {
+                for ret_id in &ret_ids {
+                    if self.add_uses_edge(from_node, *ret_id) {
+                        info!(
+                            "New edge added for Use from {} to {} (return-value propagation)",
+                            self.nodes_arena[from_node].get_name(),
+                            self.nodes_arena[*ret_id].get_name()
+                        );
+                    }
+                    if first_ret.is_none() {
+                        first_ret = Some(*ret_id);
+                    }
+                }
+            }
+        }
+        if first_ret.is_some() {
+            return first_ret;
         }
 
         func_node
