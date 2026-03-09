@@ -43,9 +43,13 @@ def func_b():
     pass
 
 
-def alias_caller():
-    alias = func_a
-    alias = func_b
+def branch_alias_caller(flag):
+    """Alias assigned in an if/else branch — both values are genuinely reachable
+    depending on flag, so a sound analysis must emit uses edges to both."""
+    if flag:
+        alias = func_a
+    else:
+        alias = func_b
     alias()
 
 
@@ -53,7 +57,14 @@ def bar():
     pass
 
 
-def import_alias_caller():
-    foo = func_a
-    foo = bar
+def local_rebind_caller(flag):
+    """Local variable rebound across branches.
+
+    (Not import-alias — this is plain local rebinding via an if/else branch.
+    Both func_a and bar are genuinely reachable depending on flag.)
+    """
+    if flag:
+        foo = func_a
+    else:
+        foo = bar
     foo()

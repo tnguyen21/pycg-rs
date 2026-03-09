@@ -24,8 +24,11 @@ def caller(cond):
     x.method()
 
 
-# Simple rebinding: after x = A() then x = B(), x -> {A, B}
-def rebind_caller():
+# Conditional rebinding: x = A() unconditionally; then x = B() only when flag
+# is True.  Both A.method and B.method are genuinely reachable depending on the
+# runtime value of flag, so a sound analysis must retain both in the join.
+def conditional_rebind_caller(flag):
     x = A()
-    x = B()
+    if flag:
+        x = B()
     x.method()

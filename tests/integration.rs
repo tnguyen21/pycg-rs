@@ -1209,19 +1209,21 @@ fn test_inv1_branch_join_preserves_both_branches() {
     );
 }
 
-/// `rebind_caller` does `x = A(); x = B(); x.method()`.
-/// The rebinding must union rather than overwrite, so both A.method and
-/// B.method must appear.
+/// `conditional_rebind_caller` in accuracy_branch.py assigns `x = A()`
+/// unconditionally and then `x = B()` only inside an `if flag:` branch.
+/// Because the rebind is conditional, both A.method and B.method are genuinely
+/// reachable (depending on the runtime value of `flag`).  A sound analysis must
+/// retain both at the join point and emit uses edges to both.
 #[test]
-fn test_inv1_rebind_preserves_earlier_value() {
+fn test_inv1_conditional_rebind_both_branches() {
     let cg = make_single_fixture("accuracy_branch.py");
-    let uses = get_uses(&cg, "rebind_caller");
+    let uses = get_uses(&cg, "conditional_rebind_caller");
     assert!(
         uses.contains("method"),
-        "rebind_caller should use method after rebinding, got: {uses:?}"
+        "conditional_rebind_caller should use method (branch join), got: {uses:?}"
     );
-    let caller_ids = find_nodes_by_name(&cg, "rebind_caller");
-    assert!(!caller_ids.is_empty(), "rebind_caller node must exist");
+    let caller_ids = find_nodes_by_name(&cg, "conditional_rebind_caller");
+    assert!(!caller_ids.is_empty(), "conditional_rebind_caller node must exist");
     let method_nodes: Vec<usize> = find_nodes_by_name(&cg, "method")
         .into_iter()
         .filter(|&id| {
@@ -1234,8 +1236,8 @@ fn test_inv1_rebind_preserves_earlier_value() {
         .collect();
     assert!(
         method_nodes.len() >= 2,
-        "rebind_caller should use method from both A and B after rebinding, \
-         found {} method node(s)",
+        "conditional_rebind_caller should use method from both A (unconditional) \
+         and B (conditional branch) — found {} method node(s)",
         method_nodes.len()
     );
 }
@@ -1244,35 +1246,42 @@ fn test_inv1_rebind_preserves_earlier_value() {
 // INV-2: alias rebinding — earlier candidate must not be silently dropped
 // -------------------------------------------------------------------
 
-/// `alias_caller` does `alias = func_a; alias = func_b; alias()`.
-/// With ValueSet both func_a and func_b must appear in the uses set.
+/// `branch_alias_caller(flag)` assigns `alias = func_a` in the if-branch and
+/// `alias = func_b` in the else-branch.  Because the assignment is conditional,
+/// both func_a and func_b are genuinely reachable at the `alias()` call site
+/// (depending on the runtime value of `flag`).  The analyzer must emit uses
+/// edges to both.
 #[test]
-fn test_inv2_alias_rebind_preserves_both_values() {
+fn test_inv2_branch_alias_both_values() {
     let cg = make_single_fixture("accuracy_alias.py");
-    let uses = get_uses(&cg, "alias_caller");
+    let uses = get_uses(&cg, "branch_alias_caller");
     assert!(
         uses.contains("func_a"),
-        "alias_caller should use func_a after alias rebinding, got: {uses:?}"
+        "branch_alias_caller should use func_a (if-branch target), got: {uses:?}"
     );
     assert!(
         uses.contains("func_b"),
-        "alias_caller should use func_b after alias rebinding, got: {uses:?}"
+        "branch_alias_caller should use func_b (else-branch target), got: {uses:?}"
     );
 }
 
-/// `import_alias_caller` does `foo = func_a; foo = bar; foo()`.
-/// Both func_a and bar must remain reachable.
+/// `local_rebind_caller(flag)` assigns `foo = func_a` in the if-branch and
+/// `foo = bar` in the else-branch.  Both func_a and bar are genuinely reachable
+/// at the `foo()` call site depending on `flag`.
+///
+/// (Renamed from the mislabeled `import_alias_caller` — there is no import
+/// alias in this fixture; it is plain local variable rebinding via branches.)
 #[test]
-fn test_inv2_import_alias_retains_earlier_candidate() {
+fn test_inv2_local_rebind_branch_both_values() {
     let cg = make_single_fixture("accuracy_alias.py");
-    let uses = get_uses(&cg, "import_alias_caller");
+    let uses = get_uses(&cg, "local_rebind_caller");
     assert!(
         uses.contains("func_a"),
-        "import_alias_caller should use func_a (first alias target), got: {uses:?}"
+        "local_rebind_caller should use func_a (if-branch target), got: {uses:?}"
     );
     assert!(
         uses.contains("bar"),
-        "import_alias_caller should use bar (second alias target), got: {uses:?}"
+        "local_rebind_caller should use bar (else-branch target), got: {uses:?}"
     );
 }
 
