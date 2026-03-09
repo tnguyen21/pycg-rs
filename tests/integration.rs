@@ -1,6 +1,6 @@
 //! Integration tests for pyan-rs.
 //!
-//! Uses Python test fixtures in tests/test_code/ and tests/old_tests/.
+//! Uses Python test fixtures in tests/test_code/.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -259,40 +259,57 @@ fn test_text_output_valid() {
 // Regression: don't crash on edge cases
 // ===================================================================
 
+/// Issue #2: annotated assignments at module level (`a: int = 3`) must not
+/// crash the analyzer.
 #[test]
 fn test_regression_annotated_assignments() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("old_tests")
-        .join("issue2");
-    if dir.exists() {
-        let files = collect_py_files(&dir);
-        let _ = CallGraph::new(&files, None);
-    }
+    let fixture = test_code_dir().join("regression_issue2.py");
+    let files = vec![fixture.to_string_lossy().to_string()];
+    let cg = CallGraph::new(&files, None)
+        .expect("issue2: annotated assignment must not crash the analyzer");
+    // The file defines annotated_fn and Container – verify we produced nodes.
+    assert!(!cg.nodes_arena.is_empty(), "issue2: graph should not be empty");
+    let fn_names: Vec<_> = cg.nodes_arena.iter()
+        .filter(|n| matches!(n.flavor,
+            pycallgraph_rs::node::Flavor::Function | pycallgraph_rs::node::Flavor::Method))
+        .map(|n| n.name.as_str())
+        .collect();
+    assert!(fn_names.contains(&"annotated_fn"),
+        "issue2: annotated_fn not found, got: {fn_names:?}");
 }
 
+/// Issue #3: complex / nested comprehensions (list-inside-list, dict-in-list,
+/// generator-as-iterable) must not crash the analyzer.
 #[test]
 fn test_regression_comprehensions() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("old_tests")
-        .join("issue3");
-    if dir.exists() {
-        let files = collect_py_files(&dir);
-        let _ = CallGraph::new(&files, None);
-    }
+    let fixture = test_code_dir().join("regression_issue3.py");
+    let files = vec![fixture.to_string_lossy().to_string()];
+    let cg = CallGraph::new(&files, None)
+        .expect("issue3: comprehensions must not crash the analyzer");
+    let fn_names: Vec<_> = cg.nodes_arena.iter()
+        .filter(|n| matches!(n.flavor,
+            pycallgraph_rs::node::Flavor::Function | pycallgraph_rs::node::Flavor::Method))
+        .map(|n| n.name.as_str())
+        .collect();
+    assert!(fn_names.contains(&"f"), "issue3: function f not found, got: {fn_names:?}");
+    assert!(fn_names.contains(&"g"), "issue3: function g not found, got: {fn_names:?}");
+    assert!(fn_names.contains(&"h"), "issue3: function h not found, got: {fn_names:?}");
 }
 
+/// Issue #5: files that reference external / uninstalled packages (numpy,
+/// pandas) and relative imports whose targets don't exist must not crash.
 #[test]
 fn test_regression_external_deps() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("old_tests")
-        .join("issue5");
-    if dir.exists() {
-        let files = collect_py_files(&dir);
-        let _ = CallGraph::new(&files, None);
-    }
+    let fixture = test_code_dir().join("regression_issue5.py");
+    let files = vec![fixture.to_string_lossy().to_string()];
+    let cg = CallGraph::new(&files, None)
+        .expect("issue5: external-dep imports must not crash the analyzer");
+    let class_names: Vec<_> = cg.nodes_arena.iter()
+        .filter(|n| n.flavor == pycallgraph_rs::node::Flavor::Class)
+        .map(|n| n.name.as_str())
+        .collect();
+    assert!(class_names.contains(&"MyProcessor"),
+        "issue5: MyProcessor not found, got: {class_names:?}");
 }
 
 // ===================================================================
