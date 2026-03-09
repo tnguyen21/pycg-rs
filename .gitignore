@@ -1,1 +1,8 @@
 /target
+
+# Local reference clones and corpora — populated by scripts/bootstrap-corpora.sh
+# These directories are not part of the project source and must NOT be committed.
+# They are ignored so that `git status` stays clean on developer machines.
+/pyan/
+/PyCG/
+/benchmarks/corpora/
