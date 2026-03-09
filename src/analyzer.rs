@@ -20,17 +20,22 @@ use ruff_source_file::LineIndex;
 use ruff_text_size::Ranged;
 
 use crate::node::{Flavor, Node, NodeId};
+use crate::scope::ValueSet;
 
 // ---------------------------------------------------------------------------
 // Scope info gathered from AST (replaces Python's `symtable`)
 // ---------------------------------------------------------------------------
 
 /// Lightweight scope info extracted from the AST in a pre-pass.
+///
+/// `defs` maps each locally-declared name to the set of NodeIds it may point
+/// to.  An empty `ValueSet` means the name is declared but unresolved.
+/// Bindings are unioned on rebind (no last-writer-wins).
 #[derive(Debug, Clone)]
 struct ScopeInfo {
     #[allow(dead_code)]
     name: String,
-    defs: HashMap<String, Option<NodeId>>,
+    defs: HashMap<String, ValueSet>,
     locals: HashSet<String>,
 }
 
@@ -44,7 +49,10 @@ impl ScopeInfo {
     }
 
     fn from_names(name: &str, identifiers: &HashSet<String>) -> Self {
-        let defs = identifiers.iter().map(|id| (id.clone(), None)).collect();
+        let defs = identifiers
+            .iter()
+            .map(|id| (id.clone(), ValueSet::empty()))
+            .collect();
         let locals = identifiers.clone();
         Self {
             name: name.to_string(),
@@ -213,11 +221,11 @@ impl CallGraph {
         // Nested scopes
         self.collect_nested_scopes(&module.body, &module_ns, &mut scopes);
 
-        // Merge into existing scopes
+        // Merge into existing scopes (union values rather than overwrite)
         for (ns, sc) in scopes {
             if let Some(existing) = self.scopes.get_mut(&ns) {
-                for (name, val) in sc.defs {
-                    existing.defs.entry(name).or_insert(val);
+                for (name, vs) in sc.defs {
+                    existing.defs.entry(name).or_default().union_with(&vs);
                 }
             } else {
                 self.scopes.insert(ns, sc);
@@ -231,12 +239,12 @@ impl CallGraph {
             match stmt {
                 Stmt::FunctionDef(f) => {
                     let name = f.name.id.to_string();
-                    scope.defs.insert(name.clone(), None);
+                    scope.defs.entry(name.clone()).or_default();
                     scope.locals.insert(name);
                 }
                 Stmt::ClassDef(c) => {
                     let name = c.name.id.to_string();
-                    scope.defs.insert(name.clone(), None);
+                    scope.defs.entry(name.clone()).or_default();
                     scope.locals.insert(name);
                 }
                 Stmt::Import(imp) => {
@@ -246,7 +254,7 @@ impl CallGraph {
                         } else {
                             alias.name.id.to_string()
                         };
-                        scope.defs.insert(name, None);
+                        scope.defs.entry(name).or_default();
                     }
                 }
                 Stmt::ImportFrom(imp) => {
@@ -256,7 +264,7 @@ impl CallGraph {
                         } else {
                             alias.name.id.to_string()
                         };
-                        scope.defs.insert(name, None);
+                        scope.defs.entry(name).or_default();
                     }
                 }
                 Stmt::Assign(a) => {
@@ -277,12 +285,12 @@ impl CallGraph {
                 }
                 Stmt::Global(g) => {
                     for name in &g.names {
-                        scope.defs.insert(name.id.to_string(), None);
+                        scope.defs.entry(name.id.to_string()).or_default();
                     }
                 }
                 Stmt::Nonlocal(n) => {
                     for name in &n.names {
-                        scope.defs.insert(name.id.to_string(), None);
+                        scope.defs.entry(name.id.to_string()).or_default();
                     }
                 }
                 // If/While/With/Try — recurse into their bodies at the same
@@ -310,7 +318,7 @@ impl CallGraph {
                     for handler in &s.handlers {
                         let ExceptHandler::ExceptHandler(h) = handler;
                         if let Some(ref name) = h.name {
-                            scope.defs.insert(name.id.to_string(), None);
+                            scope.defs.entry(name.id.to_string()).or_default();
                             scope.locals.insert(name.id.to_string());
                         }
                         self.collect_scope_defs(&h.body, scope);
@@ -337,30 +345,30 @@ impl CallGraph {
                     let ns = format!("{parent_ns}.{name}");
                     let mut scope = ScopeInfo::new(&name);
 
-                    // Add parameter names
+                    // Add parameter names (declared with empty ValueSet)
                     for param in &f.parameters.args {
                         let pname = param.parameter.name.id.to_string();
-                        scope.defs.insert(pname.clone(), None);
+                        scope.defs.entry(pname.clone()).or_default();
                         scope.locals.insert(pname);
                     }
                     for param in &f.parameters.posonlyargs {
                         let pname = param.parameter.name.id.to_string();
-                        scope.defs.insert(pname.clone(), None);
+                        scope.defs.entry(pname.clone()).or_default();
                         scope.locals.insert(pname);
                     }
                     for param in &f.parameters.kwonlyargs {
                         let pname = param.parameter.name.id.to_string();
-                        scope.defs.insert(pname.clone(), None);
+                        scope.defs.entry(pname.clone()).or_default();
                         scope.locals.insert(pname);
                     }
                     if let Some(ref va) = f.parameters.vararg {
                         let pname = va.name.id.to_string();
-                        scope.defs.insert(pname.clone(), None);
+                        scope.defs.entry(pname.clone()).or_default();
                         scope.locals.insert(pname);
                     }
                     if let Some(ref kw) = f.parameters.kwarg {
                         let pname = kw.name.id.to_string();
-                        scope.defs.insert(pname.clone(), None);
+                        scope.defs.entry(pname.clone()).or_default();
                         scope.locals.insert(pname);
                     }
 
@@ -414,7 +422,7 @@ impl CallGraph {
         match target {
             Expr::Name(n) => {
                 let name = n.id.to_string();
-                scope.defs.insert(name.clone(), None);
+                scope.defs.entry(name.clone()).or_default();
                 scope.locals.insert(name);
             }
             Expr::Tuple(t) => {
@@ -599,32 +607,57 @@ impl CallGraph {
     // Value getter/setter (scope-based name resolution)
     // =====================================================================
 
-    /// Get the value (NodeId) of `name` in the current scope stack.
+    /// Get the first (any) value of `name` in the current scope stack.
+    ///
+    /// This is a backward-compat shim over `get_values`.  Prefer `get_values`
+    /// when iterating over all possible pointees.
     fn get_value(&self, name: &str) -> Option<NodeId> {
-        for scope_key in self.scope_stack.iter().rev() {
-            if let Some(scope) = self.scopes.get(scope_key)
-                && let Some(Some(val)) = scope.defs.get(name) {
-                    return Some(*val);
-                }
-        }
-        None
+        self.get_values(name).first()
     }
 
-    /// Set the value of `name` in the innermost scope that knows about it.
+    /// Get all possible values of `name` in the current scope stack.
+    ///
+    /// Walks from innermost to outermost scope and returns the `ValueSet` from
+    /// the first scope that declares the name.
+    fn get_values(&self, name: &str) -> ValueSet {
+        for scope_key in self.scope_stack.iter().rev() {
+            if let Some(scope) = self.scopes.get(scope_key)
+                && let Some(vs) = scope.defs.get(name)
+            {
+                return vs.clone();
+            }
+        }
+        ValueSet::empty()
+    }
+
+    /// Add `value` to the binding set of `name` in the innermost scope that
+    /// declares it.  If `value` is `None`, just ensure the name is declared
+    /// (creates an empty entry if needed).
+    ///
+    /// Unlike the old single-value overwrite, this **unions** rather than
+    /// replaces, so all plausible pointees from different branches are kept.
     fn set_value(&mut self, name: &str, value: Option<NodeId>) {
         for scope_key in self.scope_stack.iter().rev() {
             if let Some(scope) = self.scopes.get(scope_key)
-                && scope.defs.contains_key(name) {
-                    let scope = self.scopes.get_mut(scope_key).unwrap();
-                    scope.defs.insert(name.to_string(), value);
-                    return;
+                && scope.defs.contains_key(name)
+            {
+                let scope = self.scopes.get_mut(scope_key).unwrap();
+                if let Some(id) = value {
+                    scope.defs.entry(name.to_string()).or_default().insert(id);
                 }
+                // If value is None: name already declared — nothing to add.
+                return;
+            }
         }
-        // If not found in any scope, add to current scope
+        // Not declared in any enclosing scope — add to current scope.
         if let Some(scope_key) = self.scope_stack.last() {
             let scope_key = scope_key.clone();
             if let Some(scope) = self.scopes.get_mut(&scope_key) {
-                scope.defs.insert(name.to_string(), value);
+                if let Some(id) = value {
+                    scope.defs.entry(name.to_string()).or_default().insert(id);
+                } else {
+                    scope.defs.entry(name.to_string()).or_default();
+                }
             }
         }
     }
@@ -648,6 +681,10 @@ impl CallGraph {
     // =====================================================================
 
     /// Resolve an attribute chain: `obj.attr` -> (obj_node_id, attr_name).
+    ///
+    /// Returns the *first* possible object node for backward compatibility.
+    /// Call sites that need all possible objects should use
+    /// `get_obj_ids_for_expr` instead.
     fn resolve_attribute(&mut self, expr: &ExprAttribute) -> (Option<NodeId>, String) {
         let attr_name = expr.attr.id.to_string();
 
@@ -656,13 +693,13 @@ impl CallGraph {
                 let (obj_node, inner_attr_name) = self.resolve_attribute(inner_attr);
 
                 if let Some(obj_id) = obj_node
-                    && self.nodes_arena[obj_id].namespace.is_some() {
-                        let ns = self.nodes_arena[obj_id].get_name();
-                        if let Some(scope) = self.scopes.get(&ns)
-                            && let Some(Some(val)) = scope.defs.get(&inner_attr_name) {
-                                return (Some(*val), attr_name);
-                            }
+                    && self.nodes_arena[obj_id].namespace.is_some()
+                {
+                    let ns = self.nodes_arena[obj_id].get_name();
+                    if let Some(val) = self.lookup_in_scope(&ns, &inner_attr_name) {
+                        return (Some(val), attr_name);
                     }
+                }
                 (None, attr_name)
             }
             Expr::Call(call) => {
@@ -684,54 +721,101 @@ impl CallGraph {
         }
     }
 
-    /// Get the value of an attribute, following MRO if needed.
-    fn get_attribute(&mut self, expr: &ExprAttribute) -> (Option<NodeId>, Option<NodeId>) {
-        let (obj_node, attr_name) = self.resolve_attribute(expr);
-
-        if let Some(obj_id) = obj_node
-            && self.nodes_arena[obj_id].namespace.is_some() {
-                let ns = self.nodes_arena[obj_id].get_name();
-
-                // Direct lookup in object's namespace
-                if let Some(val) = self.lookup_in_scope(&ns, &attr_name) {
-                    return (Some(obj_id), Some(val));
-                }
-
-                // Try MRO ancestors
-                if let Some(mro) = self.mro.get(&obj_id).cloned() {
-                    for &base_id in mro.iter().skip(1) {
-                        let base_ns = self.nodes_arena[base_id].get_name();
-                        if let Some(val) = self.lookup_in_scope(&base_ns, &attr_name) {
-                            return (Some(base_id), Some(val));
+    /// Collect all possible NodeIds that an expression can resolve to.
+    ///
+    /// For `Name` exprs: returns all values in the binding set.
+    /// For `Attribute` exprs: resolves object (multi-value) then looks up attr.
+    /// For `Call` exprs: tries builtin resolution.
+    /// Returns an empty vec for unresolvable expressions.
+    fn get_obj_ids_for_expr(&mut self, expr: &Expr) -> Vec<NodeId> {
+        match expr {
+            Expr::Name(n) if n.ctx == ExprContext::Load => {
+                self.get_values(&n.id.to_string()).iter().collect()
+            }
+            Expr::Attribute(a) => {
+                // Get all possible values for this nested attribute
+                let attr_name = a.attr.id.to_string();
+                let obj_ids = self.get_obj_ids_for_expr(&a.value);
+                let mut results = Vec::new();
+                for obj_id in obj_ids {
+                    if self.nodes_arena[obj_id].namespace.is_none() {
+                        continue;
+                    }
+                    let ns = self.nodes_arena[obj_id].get_name();
+                    let vs = self.lookup_values_in_scope(&ns, &attr_name);
+                    if vs.is_empty() {
+                        // Try MRO
+                        if let Some(mro) = self.mro.get(&obj_id).cloned() {
+                            for &base_id in mro.iter().skip(1) {
+                                let base_ns = self.nodes_arena[base_id].get_name();
+                                let bvs = self.lookup_values_in_scope(&base_ns, &attr_name);
+                                for id in bvs.iter() {
+                                    if !results.contains(&id) {
+                                        results.push(id);
+                                    }
+                                }
+                                if !bvs.is_empty() {
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        for id in vs.iter() {
+                            if !results.contains(&id) {
+                                results.push(id);
+                            }
                         }
                     }
                 }
+                results
             }
-
-        (obj_node, None)
+            Expr::Call(c) => {
+                if let Some(id) = self.resolve_builtins(c) {
+                    vec![id]
+                } else {
+                    vec![]
+                }
+            }
+            _ => vec![],
+        }
     }
 
-    /// Look up a name in a specific scope.
+/// Look up the first value of a name in a specific (named) scope.
+    ///
+    /// Returns `None` if the scope doesn't exist or the name is unbound.
+    /// Use `lookup_values_in_scope` to get all possible values.
     fn lookup_in_scope(&self, ns: &str, name: &str) -> Option<NodeId> {
-        if let Some(scope) = self.scopes.get(ns)
-            && let Some(Some(val)) = scope.defs.get(name) {
-                return Some(*val);
-            }
-        None
+        self.lookup_values_in_scope(ns, name).first()
     }
 
-    /// Set an attribute value in the object's scope.
+    /// Look up all possible values of a name in a specific (named) scope.
+    fn lookup_values_in_scope(&self, ns: &str, name: &str) -> ValueSet {
+        if let Some(scope) = self.scopes.get(ns) {
+            if let Some(vs) = scope.defs.get(name) {
+                return vs.clone();
+            }
+        }
+        ValueSet::empty()
+    }
+
+    /// Add an attribute value to the object's scope (additive — does not
+    /// overwrite existing bindings for the same attribute name).
     fn set_attribute(&mut self, expr: &ExprAttribute, value: Option<NodeId>) -> bool {
         let (obj_node, attr_name) = self.resolve_attribute(expr);
 
         if let Some(obj_id) = obj_node
-            && self.nodes_arena[obj_id].namespace.is_some() {
-                let ns = self.nodes_arena[obj_id].get_name();
-                if let Some(scope) = self.scopes.get_mut(&ns) {
-                    scope.defs.insert(attr_name, value);
-                    return true;
+            && self.nodes_arena[obj_id].namespace.is_some()
+        {
+            let ns = self.nodes_arena[obj_id].get_name();
+            if let Some(scope) = self.scopes.get_mut(&ns) {
+                if let Some(id) = value {
+                    scope.defs.entry(attr_name).or_default().insert(id);
+                } else {
+                    scope.defs.entry(attr_name).or_default();
                 }
+                return true;
             }
+        }
         false
     }
 
@@ -925,18 +1009,19 @@ impl CallGraph {
         // Capture arg names as nonsense nodes
         self.generate_args_nodes(&node.parameters, &inner_ns);
 
-        // Bind self_name to current class
+        // Bind self_name to current class (additive insert into ValueSet)
         if let Some(ref sname) = self_name
-            && let Some(class_id) = self.get_current_class() {
-                if let Some(scope) = self.scopes.get_mut(&inner_ns) {
-                    scope.defs.insert(sname.clone(), Some(class_id));
-                }
-                info!(
-                    "Method def: setting self name \"{}\" to {}",
-                    sname,
-                    self.nodes_arena[class_id].get_name()
-                );
+            && let Some(class_id) = self.get_current_class()
+        {
+            if let Some(scope) = self.scopes.get_mut(&inner_ns) {
+                scope.defs.entry(sname.clone()).or_default().insert(class_id);
             }
+            info!(
+                "Method def: setting self name \"{}\" to {}",
+                sname,
+                self.nodes_arena[class_id].get_name()
+            );
+        }
 
         // Analyze default argument values
         self.analyze_arguments(&node.parameters, line_index);
@@ -1027,27 +1112,37 @@ impl CallGraph {
             for a in &params.args {
                 scope
                     .defs
-                    .insert(a.parameter.name.id.to_string(), Some(nonsense_node));
+                    .entry(a.parameter.name.id.to_string())
+                    .or_default()
+                    .insert(nonsense_node);
             }
             for a in &params.posonlyargs {
                 scope
                     .defs
-                    .insert(a.parameter.name.id.to_string(), Some(nonsense_node));
+                    .entry(a.parameter.name.id.to_string())
+                    .or_default()
+                    .insert(nonsense_node);
             }
             if let Some(ref va) = params.vararg {
                 scope
                     .defs
-                    .insert(va.name.id.to_string(), Some(nonsense_node));
+                    .entry(va.name.id.to_string())
+                    .or_default()
+                    .insert(nonsense_node);
             }
             for a in &params.kwonlyargs {
                 scope
                     .defs
-                    .insert(a.parameter.name.id.to_string(), Some(nonsense_node));
+                    .entry(a.parameter.name.id.to_string())
+                    .or_default()
+                    .insert(nonsense_node);
             }
             if let Some(ref kw) = params.kwarg {
                 scope
                     .defs
-                    .insert(kw.name.id.to_string(), Some(nonsense_node));
+                    .entry(kw.name.id.to_string())
+                    .or_default()
+                    .insert(nonsense_node);
             }
         }
     }
@@ -1523,36 +1618,52 @@ impl CallGraph {
     fn visit_name(&mut self, node: &ExprName, _line_index: &LineIndex) -> Option<NodeId> {
         if node.ctx == ExprContext::Load {
             let tgt_name = node.id.to_string();
-            let to_node = self.get_value(&tgt_name);
+            let values = self.get_values(&tgt_name);
             let current_class = self.get_current_class();
 
-            // Don't add uses edge to self
-            if let (Some(to), Some(cls)) = (to_node, current_class)
-                && to == cls {
-                    return to_node;
-                }
-
-            let to_id = if let Some(to) = to_node {
-                to
-            } else {
-                // Local with no resolved value
+            if values.is_empty() {
+                // Local with no resolved value — do not emit an edge.
                 if self.is_local(&tgt_name) {
                     return None;
                 }
-                // Unknown namespace
-                self.get_node(None, &tgt_name, Flavor::Unknown)
-            };
-
-            let from_node = self.get_node_of_current_namespace();
-            if self.add_uses_edge(from_node, to_id) {
-                info!(
-                    "New edge added for Use from {} to Name {}",
-                    self.nodes_arena[from_node].get_name(),
-                    self.nodes_arena[to_id].get_name()
-                );
+                // Unknown namespace — emit wildcard edge.
+                let to_id = self.get_node(None, &tgt_name, Flavor::Unknown);
+                let from_node = self.get_node_of_current_namespace();
+                if self.add_uses_edge(from_node, to_id) {
+                    info!(
+                        "New edge added for Use from {} to Name {} (wildcard)",
+                        self.nodes_arena[from_node].get_name(),
+                        self.nodes_arena[to_id].get_name()
+                    );
+                }
+                return Some(to_id);
             }
 
-            Some(to_id)
+            // Emit a uses edge for every value in the set (INV-1 / INV-2).
+            let from_node = self.get_node_of_current_namespace();
+            let mut first = None;
+            for to in values.iter() {
+                // Do not add a uses edge to the containing class itself.
+                if let Some(cls) = current_class
+                    && to == cls
+                {
+                    if first.is_none() {
+                        first = Some(to);
+                    }
+                    continue;
+                }
+                if self.add_uses_edge(from_node, to) {
+                    info!(
+                        "New edge added for Use from {} to Name {}",
+                        self.nodes_arena[from_node].get_name(),
+                        self.nodes_arena[to].get_name()
+                    );
+                }
+                if first.is_none() {
+                    first = Some(to);
+                }
+            }
+            first
         } else {
             None
         }
@@ -1564,43 +1675,77 @@ impl CallGraph {
         line_index: &LineIndex,
     ) -> Option<NodeId> {
         if node.ctx == ExprContext::Load {
-            let (obj_node, attr_node) = self.get_attribute(node);
+            let attr_name = node.attr.id.to_string();
+            let from_node = self.get_node_of_current_namespace();
 
-            if let Some(attr_id) = attr_node {
-                // Both object and attr known
-                let from_node = self.get_node_of_current_namespace();
-                if self.add_uses_edge(from_node, attr_id) {
-                    info!(
-                        "New edge added for Use from {} to {}",
-                        self.nodes_arena[from_node].get_name(),
-                        self.nodes_arena[attr_id].get_name()
-                    );
+            // Collect all possible object NodeIds for the base expression.
+            // This handles the multi-value case (INV-1): when `x` was bound in
+            // both branches of an if/else, we resolve attr for each candidate.
+            let obj_ids = self.get_obj_ids_for_expr(&node.value);
+
+            if !obj_ids.is_empty() {
+                let mut first_result: Option<NodeId> = None;
+                let mut found_any = false;
+
+                for &obj_id in &obj_ids {
+                    if self.nodes_arena[obj_id].namespace.is_none() {
+                        continue; // skip wildcards as objects
+                    }
+                    let ns = self.nodes_arena[obj_id].get_name();
+
+                    // Direct lookup in the object's scope, then MRO.
+                    let attr_result = self.lookup_in_scope(&ns, &attr_name).or_else(|| {
+                        if let Some(mro) = self.mro.get(&obj_id).cloned() {
+                            for &base_id in mro.iter().skip(1) {
+                                let base_ns = self.nodes_arena[base_id].get_name();
+                                if let Some(val) = self.lookup_in_scope(&base_ns, &attr_name) {
+                                    return Some(val);
+                                }
+                            }
+                        }
+                        None
+                    });
+
+                    let emit_id = if let Some(attr_id) = attr_result {
+                        // Attr is known: emit uses edge to the concrete node.
+                        if self.add_uses_edge(from_node, attr_id) {
+                            info!(
+                                "New edge added for Use from {} to {} (multi-value attr)",
+                                self.nodes_arena[from_node].get_name(),
+                                self.nodes_arena[attr_id].get_name()
+                            );
+                        }
+                        let attr_ns = self.nodes_arena[attr_id].namespace.clone();
+                        if attr_ns.is_some() {
+                            self.remove_wild(from_node, attr_id, &attr_name);
+                        }
+                        attr_id
+                    } else {
+                        // Obj is known but attr is not: create a placeholder
+                        // attribute node so callers can chain off it.
+                        let attr_node =
+                            self.get_node(Some(&ns), &attr_name, Flavor::Attribute);
+                        self.add_uses_edge(from_node, attr_node);
+                        self.remove_wild(from_node, obj_id, &attr_name);
+                        attr_node
+                    };
+
+                    found_any = true;
+                    if first_result.is_none() {
+                        first_result = Some(emit_id);
+                    }
                 }
-                // Remove wildcard
-                let attr_ns = self.nodes_arena[attr_id].namespace.clone();
-                if attr_ns.is_some() {
-                    let attr_name = node.attr.id.to_string();
-                    self.remove_wild(from_node, attr_id, &attr_name);
+
+                if found_any {
+                    return first_result;
                 }
-                return Some(attr_id);
             }
 
-            // Object known, but attr unknown -> create attribute node
-            if let Some(obj_id) = obj_node
-                && self.nodes_arena[obj_id].namespace.is_some() {
-                    let from_node = self.get_node_of_current_namespace();
-                    let ns = self.nodes_arena[obj_id].get_name();
-                    let attr_name = node.attr.id.to_string();
-                    let to_node = self.get_node(Some(&ns), &attr_name, Flavor::Attribute);
-                    self.add_uses_edge(from_node, to_node);
-                    self.remove_wild(from_node, obj_id, &attr_name);
-                    return Some(to_node);
-                }
-
-            // Fall through — visit the value to capture any uses
+            // Fallback: visit the value expression to capture any side-effect
+            // uses edges from an unresolvable base expression.
             self.visit_expr(&node.value, line_index)
         } else {
-            // Store/Del context
+            // Store/Del context — no uses edge needed.
             None
         }
     }
@@ -2032,19 +2177,17 @@ impl CallGraph {
 
     fn lookup_base_by_name(&self, enclosing_ns: &str, name: &str) -> Option<NodeId> {
         // Look up in enclosing scope
-        if let Some(scope) = self.scopes.get(enclosing_ns)
-            && let Some(Some(val)) = scope.defs.get(name) {
-                return Some(*val);
-            }
+        if let Some(val) = self.lookup_in_scope(enclosing_ns, name) {
+            return Some(val);
+        }
 
-        // Try module-level scope (walk up)
+        // Try module-level scope (walk up namespace hierarchy)
         let parts: Vec<&str> = enclosing_ns.split('.').collect();
         for i in (0..parts.len()).rev() {
             let ns = parts[..=i].join(".");
-            if let Some(scope) = self.scopes.get(&ns)
-                && let Some(Some(val)) = scope.defs.get(name) {
-                    return Some(*val);
-                }
+            if let Some(val) = self.lookup_in_scope(&ns, name) {
+                return Some(val);
+            }
         }
 
         None
@@ -2061,11 +2204,10 @@ impl CallGraph {
         // Follow the chain
         for part in parts.iter().skip(1) {
             let ns = self.nodes_arena[current].get_name();
-            if let Some(scope) = self.scopes.get(&ns)
-                && let Some(Some(val)) = scope.defs.get(part.as_str()) {
-                    current = *val;
-                    continue;
-                }
+            if let Some(val) = self.lookup_in_scope(&ns, part.as_str()) {
+                current = val;
+                continue;
+            }
             return None;
         }
 

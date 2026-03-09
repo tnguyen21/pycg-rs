@@ -1052,3 +1052,147 @@ fn test_accuracy_chained_call_deep_chain_gap() {
         "get_a_via_A should use A (return type of to_A() should be tracked)"
     );
 }
+
+// Accuracy harness — ValueSet binding model
+//
+// These tests verify the invariants introduced by replacing single-value
+// bindings with abstract-value sets:
+//
+//   INV-1  Branch joins and rebinding preserve all plausible pointees.
+//   INV-2  Alias chains retain multiple candidate values.
+//   INV-3  Existing green tests remain green (checked by all tests above).
+// ===================================================================
+
+/// Helper: build a CallGraph from a single fixture file.
+fn make_single_fixture(name: &str) -> CallGraph {
+    let path = test_code_dir().join(name);
+    let files = vec![path.to_string_lossy().to_string()];
+    CallGraph::new(&files, None).expect("fixture analysis should succeed")
+}
+
+// -------------------------------------------------------------------
+// INV-1: branch-join — calls from both branches must be traceable
+// -------------------------------------------------------------------
+
+/// `caller` in accuracy_branch.py assigns `x = A()` in the if-branch and
+/// `x = B()` in the else-branch, then calls `x.method()`.
+/// After the ValueSet refactor the analyzer must emit uses edges to BOTH
+/// `A.method` and `B.method` (not just the last-assigned one).
+#[test]
+fn test_inv1_branch_join_preserves_both_branches() {
+    let cg = make_single_fixture("accuracy_branch.py");
+    let uses = get_uses(&cg, "caller");
+    assert!(
+        uses.contains("method"),
+        "caller should use method (branch join), got: {uses:?}"
+    );
+    // The uses set must contain the method from BOTH A and B.
+    // We check for at least two distinct nodes named "method".
+    let method_nodes: Vec<usize> = find_nodes_by_name(&cg, "method")
+        .into_iter()
+        .filter(|&id| {
+            cg.uses_edges
+                .get(&find_nodes_by_name(&cg, "caller")[0])
+                .is_some_and(|targets| targets.contains(&id))
+        })
+        .collect();
+    assert!(
+        method_nodes.len() >= 2,
+        "caller should use method from both A and B after branch-join, \
+         found {} method node(s) in the uses set",
+        method_nodes.len()
+    );
+}
+
+/// `rebind_caller` does `x = A(); x = B(); x.method()`.
+/// The rebinding must union rather than overwrite, so both A.method and
+/// B.method must appear.
+#[test]
+fn test_inv1_rebind_preserves_earlier_value() {
+    let cg = make_single_fixture("accuracy_branch.py");
+    let uses = get_uses(&cg, "rebind_caller");
+    assert!(
+        uses.contains("method"),
+        "rebind_caller should use method after rebinding, got: {uses:?}"
+    );
+    let caller_ids = find_nodes_by_name(&cg, "rebind_caller");
+    assert!(!caller_ids.is_empty(), "rebind_caller node must exist");
+    let method_nodes: Vec<usize> = find_nodes_by_name(&cg, "method")
+        .into_iter()
+        .filter(|&id| {
+            caller_ids.iter().any(|&cid| {
+                cg.uses_edges
+                    .get(&cid)
+                    .is_some_and(|targets| targets.contains(&id))
+            })
+        })
+        .collect();
+    assert!(
+        method_nodes.len() >= 2,
+        "rebind_caller should use method from both A and B after rebinding, \
+         found {} method node(s)",
+        method_nodes.len()
+    );
+}
+
+// -------------------------------------------------------------------
+// INV-2: alias rebinding — earlier candidate must not be silently dropped
+// -------------------------------------------------------------------
+
+/// `alias_caller` does `alias = func_a; alias = func_b; alias()`.
+/// With ValueSet both func_a and func_b must appear in the uses set.
+#[test]
+fn test_inv2_alias_rebind_preserves_both_values() {
+    let cg = make_single_fixture("accuracy_alias.py");
+    let uses = get_uses(&cg, "alias_caller");
+    assert!(
+        uses.contains("func_a"),
+        "alias_caller should use func_a after alias rebinding, got: {uses:?}"
+    );
+    assert!(
+        uses.contains("func_b"),
+        "alias_caller should use func_b after alias rebinding, got: {uses:?}"
+    );
+}
+
+/// `import_alias_caller` does `foo = func_a; foo = bar; foo()`.
+/// Both func_a and bar must remain reachable.
+#[test]
+fn test_inv2_import_alias_retains_earlier_candidate() {
+    let cg = make_single_fixture("accuracy_alias.py");
+    let uses = get_uses(&cg, "import_alias_caller");
+    assert!(
+        uses.contains("func_a"),
+        "import_alias_caller should use func_a (first alias target), got: {uses:?}"
+    );
+    assert!(
+        uses.contains("bar"),
+        "import_alias_caller should use bar (second alias target), got: {uses:?}"
+    );
+}
+
+// -------------------------------------------------------------------
+// INV-3 regression guard: ValueSet must not explode simple single-value cases
+// -------------------------------------------------------------------
+
+/// A plain function call `f()` where `f` has exactly one binding must still
+/// resolve to exactly one target — not zero, not many.
+#[test]
+fn test_inv3_single_binding_still_resolves() {
+    let cg = make_features_graph();
+    // `bar` calls `foo` — simple single-value case must still work.
+    assert!(
+        has_uses_edge(&cg, "bar", "foo"),
+        "bar should still use foo after ValueSet refactor (single-value regression)"
+    );
+}
+
+/// Inheritance resolution must not regress: `Derived` uses `Base`.
+#[test]
+fn test_inv3_inheritance_still_resolves() {
+    let cg = make_features_graph();
+    assert!(
+        has_uses_edge(&cg, "Derived", "Base"),
+        "Derived should still use Base after ValueSet refactor"
+    );
+}

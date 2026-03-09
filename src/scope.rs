@@ -1,5 +1,82 @@
 use std::collections::{HashMap, HashSet};
 
+// ---------------------------------------------------------------------------
+// ValueSet — compact abstract-value set for name bindings
+// ---------------------------------------------------------------------------
+
+/// A compact set of abstract values (NodeIds) for a name binding.
+///
+/// Represents the set of all possible pointees for a name at a given program
+/// point.  Designed to stay small in the common case (single binding), so a
+/// plain `Vec` with dedup is preferred over a full `HashSet`.
+///
+/// # Invariants
+/// * No duplicate NodeIds are stored.
+/// * Order is insertion-order (deterministic, first-wins semantics for
+///   `first()`).
+#[derive(Debug, Clone, Default)]
+pub struct ValueSet(Vec<usize>);
+
+impl ValueSet {
+    /// Create an empty set (name declared but unresolved).
+    pub fn empty() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Create a singleton set.
+    pub fn singleton(id: usize) -> Self {
+        Self(vec![id])
+    }
+
+    /// Add a value.  Returns `true` if the set changed (id was not already
+    /// present).
+    pub fn insert(&mut self, id: usize) -> bool {
+        if !self.0.contains(&id) {
+            self.0.push(id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Union `other` into `self`.  Returns `true` if `self` changed.
+    pub fn union_with(&mut self, other: &ValueSet) -> bool {
+        let mut changed = false;
+        for &id in &other.0 {
+            changed |= self.insert(id);
+        }
+        changed
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// First value (insertion-order), if any.  Used as a backward-compat
+    /// fallback by callers that only need one resolved target.
+    pub fn first(&self) -> Option<usize> {
+        self.0.first().copied()
+    }
+
+    /// Iterator over all values.
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.0.iter().copied()
+    }
+
+    /// All values as a slice.
+    pub fn as_slice(&self) -> &[usize] {
+        &self.0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scope — lexical scope with string-keyed bindings (used by the public API)
+// ---------------------------------------------------------------------------
+
 /// Tracks name bindings within a lexical scope.
 #[derive(Debug, Clone)]
 pub struct Scope {
