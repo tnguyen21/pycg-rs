@@ -687,11 +687,9 @@ fn test_corpus_flask() {
 // ===================================================================
 // Golden accuracy harness
 //
-// Captures the hard call-resolution cases before the analyzer is
-// refactored.  Each section asserts concrete uses/defines edges for a
-// specific accuracy scenario.  Known gaps are marked with #[ignore] and
-// a "GAP:" prefix so they become passing tests once the corresponding
-// analyzer improvement lands.
+// Asserts concrete uses/defines edges for hard call-resolution scenarios.
+// All gaps previously documented here have been closed by the worklist-based
+// return-value propagation (function_returns + fixpoint loop in analyzer.rs).
 //
 // Fixtures live in tests/test_code/accuracy_*.py and
 // tests/test_code/accuracy_*/; they are small curated snippets adapted
@@ -791,16 +789,15 @@ fn test_accuracy_factory_constructs_product() {
     );
 }
 
-/// GAP: opaque call result — result = factory(); result.make() does not
-/// currently produce a uses edge to Product.make because the return-value
-/// type is not propagated through single-value bindings.
+/// Return-value propagation: result = factory(); result.make() resolves to
+/// Product.make because factory()'s return value (Product instance) is now
+/// propagated back to the call site via function_returns tracking.
 #[test]
-#[ignore = "GAP: opaque return value — result.make() not tracked through factory() result binding"]
-fn test_accuracy_factory_return_method_gap() {
+fn test_accuracy_factory_return_method() {
     let cg = make_single_fixture_graph("accuracy_factory.py");
     assert!(
         has_uses_edge(&cg, "consumer", "make"),
-        "consumer should use Product.make via return-value chain (not yet implemented)"
+        "consumer should use Product.make via return-value propagation"
     );
 }
 
@@ -916,10 +913,8 @@ fn test_accuracy_star_import_calls_resolve() {
 // Tests the case where pkg/__init__.py re-exports a function from
 // pkg/impl.py, and a user module imports via the package.
 //
-// Currently: the __init__.py import itself IS tracked (package uses
-// reexport_func), but the downstream binding in the user module is
-// NOT propagated (reexport_caller gets no uses edge).  The gap is
-// documented with #[ignore].
+// Both the __init__.py import edge and the downstream binding in the user
+// module are now tracked after the return-value propagation fixpoint.
 // -------------------------------------------------------------------
 
 #[test]
@@ -937,13 +932,11 @@ fn test_accuracy_reexport_package_import_tracked() {
     );
 }
 
-/// GAP: shallow import/binding propagation — when a user module imports a
-/// function via a package re-export (`from pkg import fn` where pkg's
-/// __init__ re-exports fn from pkg.impl), the uses edge from the caller
-/// to fn is currently not emitted.
+/// Import re-export binding: when a user module imports a function via a
+/// package re-export (`from pkg import fn` where pkg's __init__ re-exports
+/// fn from pkg.impl), the uses edge from the caller now reaches fn.
 #[test]
-#[ignore = "GAP: import binding through __init__ re-export not propagated to caller uses edges"]
-fn test_accuracy_reexport_chain_caller_gap() {
+fn test_accuracy_reexport_chain_caller() {
     let cg = make_multi_fixture_graph(&[
         "test_code/accuracy_reexport/__init__.py",
         "test_code/accuracy_reexport/impl.py",
@@ -951,7 +944,7 @@ fn test_accuracy_reexport_chain_caller_gap() {
     ]);
     assert!(
         has_uses_edge(&cg, "reexport_caller", "reexport_func"),
-        "reexport_caller should use reexport_func via package re-export chain (not yet implemented)"
+        "reexport_caller should use reexport_func via package re-export chain"
     );
 }
 
@@ -981,14 +974,12 @@ fn test_accuracy_starred_unpack_constructors_tracked() {
 }
 
 /// GAP: method calls on positionally-bound starred-unpack targets are not
-/// resolved when the target is assigned through an explicit (non-starred)
-/// position in the tuple.  e.g. `a, b, *c = Alpha(), Beta(), ...; a.alpha_method()`
-/// — `a` is known to be Alpha() at position 0, but method resolution is lost.
+/// Method calls on positionally-bound starred-unpack targets now resolve.
+/// `a, b, *c = Alpha(), Beta(), ...; a.alpha_method()` — `a` is bound to
+/// Alpha() and its method calls are tracked via return-value propagation.
 #[test]
-#[ignore = "GAP: method resolution on explicit starred-unpack targets (a in a,b,*c=...) not tracked"]
-fn test_accuracy_starred_unpack_explicit_target_methods_gap() {
+fn test_accuracy_starred_unpack_explicit_target_methods() {
     let cg = make_features_graph();
-    // a is first element (Alpha), b is second element (Beta)
     assert!(
         has_uses_edge(&cg, "star_at_end", "alpha_method"),
         "star_at_end should use alpha_method via a.alpha_method() (a = Alpha())"
@@ -1038,18 +1029,60 @@ fn test_accuracy_chained_call_enclosing_func_tracked() {
     );
 }
 
-/// GAP: deep chained attribute access through an opaque return value.
-/// `self.to_A()` returns an `A` instance; `.b` is an attribute of that
-/// instance.  The analyzer does not propagate the return type, so the
-/// attribute chain `.b.a` after `to_A()` is not resolved.
+/// Return-value propagation: `self.to_A()` returns an `A` instance.
+/// After propagation, get_a_via_A has a uses edge to A because visit_call
+/// for to_A() now returns the A class node and emits the uses edge.
 #[test]
-#[ignore = "GAP: attribute access on opaque call result (to_A().b) not resolved to A's members"]
-fn test_accuracy_chained_call_deep_chain_gap() {
+fn test_accuracy_chained_call_deep_chain() {
     let cg = make_submodule_graph();
-    // Ideal: get_a_via_A -> A (via to_A's return type propagation)
     assert!(
         has_uses_edge(&cg, "get_a_via_A", "A"),
-        "get_a_via_A should use A (return type of to_A() should be tracked)"
+        "get_a_via_A should use A via return-value propagation of to_A()"
+    );
+}
+
+// -------------------------------------------------------------------
+// Higher-order function accuracy
+//
+// Tests that calling the return value of a factory (fn = make_greeter();
+// fn()) resolves to the actual returned function, and that the call graph
+// reflects this dependency.
+//
+// Adapted from PyCG micro-benchmark functions/assigned_call.
+// -------------------------------------------------------------------
+
+#[test]
+fn test_accuracy_higher_order_factory_call() {
+    // make_greeter() returns greet; call_via_factory calls make_greeter()
+    // so it must have a uses edge to make_greeter.
+    let cg = make_single_fixture_graph("accuracy_higher_order.py");
+    assert!(
+        has_uses_edge(&cg, "call_via_factory", "make_greeter"),
+        "call_via_factory should use make_greeter (direct call)"
+    );
+}
+
+#[test]
+fn test_accuracy_higher_order_return_resolved() {
+    // make_greeter() returns greet; fn = make_greeter(); fn() must resolve to greet.
+    let cg = make_single_fixture_graph("accuracy_higher_order.py");
+    assert!(
+        has_uses_edge(&cg, "call_via_factory", "greet"),
+        "call_via_factory should use greet via make_greeter() return-value propagation"
+    );
+}
+
+#[test]
+fn test_accuracy_higher_order_assigned_return() {
+    // adder = get_adder(); adder(1,2) must resolve to add_nums.
+    let cg = make_single_fixture_graph("accuracy_higher_order.py");
+    assert!(
+        has_uses_edge(&cg, "call_returned_fn", "get_adder"),
+        "call_returned_fn should use get_adder (direct call)"
+    );
+    assert!(
+        has_uses_edge(&cg, "call_returned_fn", "add_nums"),
+        "call_returned_fn should use add_nums via get_adder() return-value propagation"
     );
 }
 

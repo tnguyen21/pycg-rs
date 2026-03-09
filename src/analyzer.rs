@@ -95,6 +95,11 @@ pub struct CallGraph {
     /// MRO for each class.
     mro: HashMap<NodeId, Vec<NodeId>>,
 
+    /// Collected return values per function node, used for return-value propagation.
+    /// Maps function/method NodeId -> set of NodeIds that the function may return.
+    /// Populated during `visit_stmt(Return)` and consumed in `visit_call`.
+    function_returns: HashMap<NodeId, HashSet<NodeId>>,
+
     // File mapping ------------------------------------------------------
     module_to_filename: HashMap<String, String>,
     filenames: Vec<String>,
@@ -136,6 +141,7 @@ impl CallGraph {
             uses_edges: HashMap::new(),
             defined: HashSet::new(),
             scopes: HashMap::new(),
+            function_returns: HashMap::new(),
             class_base_ast_info: HashMap::new(),
             class_base_nodes: HashMap::new(),
             mro: HashMap::new(),
@@ -154,7 +160,7 @@ impl CallGraph {
         Ok(cg)
     }
 
-    /// Two-pass analysis.
+    /// Two-pass analysis followed by a fixpoint loop for return-value propagation.
     fn process(&mut self) -> Result<()> {
         for pass_num in 0..2 {
             for filename in self.filenames.clone() {
@@ -169,6 +175,23 @@ impl CallGraph {
                 self.resolve_base_classes();
             }
         }
+
+        // Fixpoint: keep re-analyzing until function_returns stabilises.
+        // Each extra pass may propagate return types discovered in the previous
+        // pass through call sites, enabling downstream attribute resolution.
+        const MAX_PROPAGATION_PASSES: usize = 8;
+        for pass_num in 0..MAX_PROPAGATION_PASSES {
+            let prev_returns = self.function_returns.clone();
+            for filename in self.filenames.clone() {
+                debug!("========== propagation pass {}, file '{}' ==========", pass_num + 1, filename);
+                self.process_one(&filename)?;
+            }
+            if self.function_returns == prev_returns {
+                debug!("Return propagation converged after {} extra passes", pass_num + 1);
+                break;
+            }
+        }
+
         self.postprocess();
         Ok(())
     }
@@ -863,7 +886,18 @@ impl CallGraph {
             Stmt::With(node) => self.visit_with(node, line_index),
             Stmt::Return(node) => {
                 if let Some(ref value) = node.value {
-                    self.visit_expr(value, line_index);
+                    let ret_val = self.visit_expr(value, line_index);
+                    // Track return value for the enclosing function/method.
+                    // Skip argument sentinels and unknown wildcard nodes —
+                    // they don't carry useful type information.
+                    if let Some(ret_id) = ret_val {
+                        let is_sentinel = self.nodes_arena[ret_id].name.contains("^^^argument^^^");
+                        let is_unknown = self.nodes_arena[ret_id].namespace.is_none();
+                        if !is_sentinel && !is_unknown {
+                            let fn_node = self.get_node_of_current_namespace();
+                            self.function_returns.entry(fn_node).or_default().insert(ret_id);
+                        }
+                    }
                 }
             }
             Stmt::Delete(node) => self.visit_delete(node, line_index),
@@ -1775,7 +1809,8 @@ impl CallGraph {
         // General case: visit the function expression
         let func_node = self.visit_expr(&node.func, line_index);
 
-        // If calling a known class, add __init__ edge
+        // If calling a known class, add __init__ edge and return the class node
+        // as the "instance type" so downstream attribute access resolves correctly.
         if let Some(func_id) = func_node
             && self.class_base_ast_info.contains_key(&func_id) {
                 let from_node = self.get_node_of_current_namespace();
@@ -1789,7 +1824,29 @@ impl CallGraph {
                         self.nodes_arena[init_node].get_name()
                     );
                 }
+                return func_node; // class node == instance type
             }
+
+        // For function calls with known return types, propagate the return value
+        // so that callers can resolve attributes on the returned object.
+        // Pick the first known return value (deterministic via sorted iteration
+        // isn't needed — any concrete return type beats None).
+        let return_type: Option<NodeId> = func_node.and_then(|fid| {
+            self.function_returns.get(&fid).and_then(|s| s.iter().next().copied())
+        });
+        if let Some(ret_id) = return_type {
+            let from_node = self.get_node_of_current_namespace();
+            // Emit a uses edge from the caller to the return type so the
+            // call graph reflects this indirect dependency.
+            if self.add_uses_edge(from_node, ret_id) {
+                info!(
+                    "New edge added for Use from {} to {} (return-value propagation)",
+                    self.nodes_arena[from_node].get_name(),
+                    self.nodes_arena[ret_id].get_name()
+                );
+            }
+            return Some(ret_id);
+        }
 
         func_node
     }
