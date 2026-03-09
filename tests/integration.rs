@@ -932,9 +932,8 @@ fn test_accuracy_reexport_package_import_tracked() {
     );
 }
 
-/// Import re-export binding: when a user module imports a function via a
-/// package re-export (`from pkg import fn` where pkg's __init__ re-exports
-/// fn from pkg.impl), the uses edge from the caller now reaches fn.
+/// Resolved: scope-based import propagation now threads the re-export chain
+/// through __init__.py so `reexport_caller` correctly sees `reexport_func`.
 #[test]
 fn test_accuracy_reexport_chain_caller() {
     let cg = make_multi_fixture_graph(&[
@@ -1300,5 +1299,124 @@ fn test_inv3_inheritance_still_resolves() {
     assert!(
         has_uses_edge(&cg, "Derived", "Base"),
         "Derived should still use Base after ValueSet refactor"
+    );
+}
+
+// ===================================================================
+// Import precision tests (scope-based resolution)
+//
+// These tests verify the invariants introduced by the scope-based import
+// improvement:
+//
+//   INV-1  Imported aliases/reexports resolve to concrete (namespaced)
+//           nodes when the source module is analyzable.
+//   INV-2  `from x import *` gains a sound static approximation —
+//           exported names bind to their concrete definitions.
+//   INV-3  Import precision does not cause false-positive fanout:
+//           the caller only uses what it actually calls.
+// ===================================================================
+
+/// Check that a uses edge from `from_name` reaches a concrete (namespaced)
+/// node with the given `to_name`, rather than a wildcard.
+fn has_concrete_uses_edge(cg: &CallGraph, from_name: &str, to_name: &str) -> bool {
+    for &fid in find_nodes_by_name(cg, from_name).iter() {
+        if let Some(targets) = cg.uses_edges.get(&fid) {
+            for &tid in targets {
+                let n = &cg.nodes_arena[tid];
+                if n.name == to_name && n.namespace.is_some() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+// -------------------------------------------------------------------
+// INV-1: Re-export chain resolves to the concrete definition
+// -------------------------------------------------------------------
+
+/// After scope-based resolution, `reexport_caller` must reach
+/// `reexport_func` as a concrete node (from accuracy_reexport.impl),
+/// not just a wildcard placeholder.
+#[test]
+fn test_inv1_reexport_chain_resolves_concrete_node() {
+    let cg = make_multi_fixture_graph(&[
+        "test_code/accuracy_reexport/__init__.py",
+        "test_code/accuracy_reexport/impl.py",
+        "test_code/accuracy_reexport/user.py",
+    ]);
+    assert!(
+        has_concrete_uses_edge(&cg, "reexport_caller", "reexport_func"),
+        "reexport_caller must use reexport_func via a concrete (namespaced) node, \
+         not a wildcard placeholder"
+    );
+}
+
+/// Copying imported facts must not go stale: the `accuracy_reexport`
+/// package itself (the __init__) must also hold a concrete edge to
+/// `reexport_func` (the node it imported from impl).
+#[test]
+fn test_inv1_reexport_package_node_concrete() {
+    let cg = make_multi_fixture_graph(&[
+        "test_code/accuracy_reexport/__init__.py",
+        "test_code/accuracy_reexport/impl.py",
+        "test_code/accuracy_reexport/user.py",
+    ]);
+    assert!(
+        has_concrete_uses_edge(&cg, "accuracy_reexport", "reexport_func"),
+        "the accuracy_reexport package node must concretely use reexport_func \
+         (regression: copied import fact must not diverge from source)"
+    );
+}
+
+// -------------------------------------------------------------------
+// INV-2: Star import produces sound concrete bindings
+// -------------------------------------------------------------------
+
+/// `star_import_caller` calls `exported_func1` and `exported_func2` after
+/// `from accuracy_star_src import *`.  Both must resolve to concrete nodes
+/// (i.e. namespaced, not wildcards) so the result is a sound approximation.
+#[test]
+fn test_inv2_star_import_concrete_nodes() {
+    let cg = make_multi_fixture_graph(&[
+        "test_code/accuracy_star_src.py",
+        "test_code/accuracy_star_user.py",
+    ]);
+    assert!(
+        has_concrete_uses_edge(&cg, "star_import_caller", "exported_func1"),
+        "star_import_caller must reach exported_func1 as a concrete node \
+         (INV-2: star import static approximation)"
+    );
+    assert!(
+        has_concrete_uses_edge(&cg, "star_import_caller", "exported_func2"),
+        "star_import_caller must reach exported_func2 as a concrete node \
+         (INV-2: star import static approximation)"
+    );
+}
+
+// -------------------------------------------------------------------
+// INV-3: Import precision — no false-positive fanout
+// -------------------------------------------------------------------
+
+/// The caller in the re-export fixture only calls `reexport_func()`.
+/// After resolution, `reexport_caller`'s uses set must be small — it must
+/// not gain spurious edges to unrelated nodes just because of import handling.
+#[test]
+fn test_inv3_reexport_no_spurious_fanout() {
+    let cg = make_multi_fixture_graph(&[
+        "test_code/accuracy_reexport/__init__.py",
+        "test_code/accuracy_reexport/impl.py",
+        "test_code/accuracy_reexport/user.py",
+    ]);
+    let uses = get_uses(&cg, "reexport_caller");
+    // Should use reexport_func and nothing else from this tiny fixture.
+    assert!(
+        uses.contains("reexport_func"),
+        "reexport_caller must use reexport_func, got: {uses:?}"
+    );
+    assert!(
+        uses.len() <= 3,
+        "reexport_caller has unexpected extra uses edges (noise explosion): {uses:?}"
     );
 }

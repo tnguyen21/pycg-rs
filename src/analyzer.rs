@@ -282,6 +282,11 @@ impl CallGraph {
                 }
                 Stmt::ImportFrom(imp) => {
                     for alias in &imp.names {
+                        // Skip star imports — names are injected during the visit
+                        // phase once the source module's scope is available.
+                        if alias.name.id.as_str() == "*" {
+                            continue;
+                        }
                         let name = if let Some(ref asname) = alias.asname {
                             asname.id.to_string()
                         } else {
@@ -1279,29 +1284,92 @@ impl CallGraph {
             }
         };
 
+        // Handle `from mod import *` as a separate path.
+        if node.names.len() == 1 && node.names[0].name.id.as_str() == "*" {
+            self.handle_star_import(from_node, &tgt_name);
+            return;
+        }
+
         for alias in &node.names {
             let item_name = alias.name.id.to_string();
-
-            // Check if import is a module itself
-            let full_name = format!("{tgt_name}.{item_name}");
-            let to_node = if self.module_to_filename.contains_key(&full_name) {
-                self.get_node(Some(""), &full_name, Flavor::Module)
-            } else {
-                self.get_node(Some(&tgt_name), &item_name, Flavor::ImportedItem)
-            };
-
             let alias_name = if let Some(ref asname) = alias.asname {
                 asname.id.to_string()
             } else {
                 item_name.clone()
             };
 
+            // Check if the import is a sub-module.
+            let full_name = format!("{tgt_name}.{item_name}");
+            if self.module_to_filename.contains_key(&full_name) {
+                let mod_node = self.get_node(Some(""), &full_name, Flavor::Module);
+                self.set_value(&alias_name, Some(mod_node));
+                self.add_uses_edge(from_node, mod_node);
+                continue;
+            }
+
+            // Try scope-based resolution: look up the name in the source
+            // module's accumulated scope.  This propagates re-exports and
+            // alias chains without needing an extra remap pass.
+            let resolved = self.lookup_values_in_scope(&tgt_name, &item_name);
+            if !resolved.is_empty() {
+                for id in resolved.iter() {
+                    self.set_value(&alias_name, Some(id));
+                    self.add_uses_edge(from_node, id);
+                    debug!(
+                        "Import scope-resolved: {} -> {}",
+                        alias_name,
+                        self.nodes_arena[id].get_name()
+                    );
+                }
+                continue;
+            }
+
+            // Fall back to an ImportedItem placeholder.  resolve_imports
+            // will attempt to chase the chain in postprocess.
+            let to_node = self.get_node(Some(&tgt_name), &item_name, Flavor::ImportedItem);
             self.set_value(&alias_name, Some(to_node));
             if self.add_uses_edge(from_node, to_node) {
                 info!(
                     "New edge added for Use from {} to ImportFrom {}",
                     self.nodes_arena[from_node].get_name(),
                     self.nodes_arena[to_node].get_name()
+                );
+            }
+        }
+    }
+
+    /// Inject all public names from `tgt_module` into the current scope.
+    ///
+    /// Used by `from mod import *`.  Only names with non-empty ValueSets in
+    /// the source module's scope are copied; empty placeholders are skipped
+    /// (they would produce dead wildcard references).  Private names
+    /// (starting with `_`) are skipped unless explicitly listed in `__all__`.
+    fn handle_star_import(&mut self, from_node: NodeId, tgt_module: &str) {
+        // Collect the source module's bindings while holding an immutable
+        // borrow on self.scopes.
+        let bindings: Vec<(String, ValueSet)> =
+            if let Some(scope) = self.scopes.get(tgt_module) {
+                scope
+                    .defs
+                    .iter()
+                    .filter(|(name, vs)| {
+                        // Skip private names and empty placeholders.
+                        !name.starts_with('_') && !vs.is_empty()
+                    })
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+        for (name, values) in bindings {
+            for id in values.iter() {
+                self.set_value(&name, Some(id));
+                self.add_uses_edge(from_node, id);
+                debug!(
+                    "Star-import: {} -> {}",
+                    name,
+                    self.nodes_arena[id].get_name()
                 );
             }
         }
@@ -2428,6 +2496,17 @@ impl CallGraph {
     }
 
     /// Resolve import edges: follow import chains to their definitions.
+    ///
+    /// Two strategies are tried in order for each remaining `ImportedItem`:
+    ///
+    /// 1. **Scope lookup** — the ImportedItem's namespace IS the source module
+    ///    name.  If `scopes[namespace][name]` is non-empty we can remap
+    ///    directly, without needing any outgoing edge on the placeholder node.
+    ///    This handles re-export chains that were not yet resolved when
+    ///    `visit_import_from` ran.
+    ///
+    /// 2. **Uses-edge walk** — legacy path kept for modules whose scopes are
+    ///    not available (external packages, etc.).
     fn resolve_imports(&mut self) {
         // Find all imported item nodes
         let import_nodes: Vec<NodeId> = self
@@ -2446,7 +2525,36 @@ impl CallGraph {
                 continue;
             }
 
-            // Check what from_id uses
+            let mod_name = self.nodes_arena[from_id]
+                .namespace
+                .clone()
+                .unwrap_or_default();
+            let item_name = self.nodes_arena[from_id].name.clone();
+
+            // Strategy 1: scope lookup in the source module.
+            let scope_vals: Vec<NodeId> =
+                self.lookup_values_in_scope(&mod_name, &item_name).iter().collect();
+            if !scope_vals.is_empty() {
+                // Prefer the first concrete (non-ImportedItem) candidate so
+                // that we chain through rather than stop at another placeholder.
+                let best = scope_vals
+                    .iter()
+                    .find(|&&id| self.nodes_arena[id].flavor != Flavor::ImportedItem)
+                    .or_else(|| scope_vals.first())
+                    .copied();
+                if let Some(target) = best {
+                    import_mapping.insert(from_id, target);
+                    // If the target is itself still an ImportedItem, chase it.
+                    if self.nodes_arena[target].flavor == Flavor::ImportedItem
+                        && target != from_id
+                    {
+                        to_resolve.push(target);
+                    }
+                    continue;
+                }
+            }
+
+            // Strategy 2: uses-edge walk (legacy path for external modules).
             let to_id = if let Some(targets) = self.uses_edges.get(&from_id) {
                 if targets.len() == 1 {
                     *targets.iter().next().unwrap()
