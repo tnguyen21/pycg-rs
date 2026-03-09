@@ -1420,3 +1420,224 @@ fn test_inv3_reexport_no_spurious_fanout() {
         "reexport_caller has unexpected extra uses edges (noise explosion): {uses:?}"
     );
 }
+
+// ===================================================================
+// INV-1: del protocol edges (__delattr__ / __delitem__)
+//
+// When the receiver of `del obj.attr` or `del obj[key]` is statically
+// known (bound to a class we analyzed), the analyzer must emit uses
+// edges to the appropriate dunder method.  Bare `del name` must NOT
+// emit any protocol edges.
+// ===================================================================
+
+/// `clear_entry` binds `registry = Registry()` then does `del registry.entry`.
+/// Since `registry` is statically bound to `Registry`, the analyzer must emit
+/// a uses edge from `clear_entry` to `Registry.__delattr__`.
+#[test]
+fn test_del_delattr_protocol_known_receiver() {
+    let cg = make_features_graph();
+    assert!(
+        has_uses_edge(&cg, "clear_entry", "__delattr__"),
+        "clear_entry should use Registry.__delattr__ via 'del registry.attr' (receiver is known Registry)"
+    );
+}
+
+/// `remove_item` binds `registry = Registry()` then does `del registry["key"]`.
+/// Since `registry` is statically bound to `Registry`, the analyzer must emit
+/// a uses edge from `remove_item` to `Registry.__delitem__`.
+#[test]
+fn test_del_delitem_protocol_known_receiver() {
+    let cg = make_features_graph();
+    assert!(
+        has_uses_edge(&cg, "remove_item", "__delitem__"),
+        "remove_item should use Registry.__delitem__ via 'del registry[key]' (receiver is known Registry)"
+    );
+}
+
+/// `unbind_local` does `del tmp` on a plain local variable.
+/// No protocol edge must be emitted for a bare name deletion.
+#[test]
+fn test_del_local_no_protocol_edge() {
+    let cg = make_features_graph();
+    let uses = get_uses(&cg, "unbind_local");
+    assert!(
+        !uses.contains("__delattr__"),
+        "unbind_local (del local var) must not emit __delattr__, got: {uses:?}"
+    );
+    assert!(
+        !uses.contains("__delitem__"),
+        "unbind_local (del local var) must not emit __delitem__, got: {uses:?}"
+    );
+}
+
+/// Protocol edges for del must only be emitted when the receiver is a
+/// known class — not for unknown/argument receivers.
+#[test]
+fn test_del_protocol_edges_are_concrete() {
+    let cg = make_features_graph();
+    // All __delattr__ / __delitem__ nodes must have a non-None namespace.
+    for method in ["__delattr__", "__delitem__"] {
+        for &nid in cg.nodes_by_name.get(method).unwrap_or(&vec![]) {
+            assert!(
+                cg.nodes_arena[nid].namespace.is_some(),
+                "del protocol method {method} must resolve to a concrete (non-wildcard) node"
+            );
+        }
+    }
+}
+
+// ===================================================================
+// str / repr builtin modeling
+//
+// Calling `str(obj)` or `repr(obj)` with a statically-known class
+// instance must emit uses edges to `obj.__str__` / `obj.__repr__`.
+// ===================================================================
+
+/// `call_str_repr` calls `str(obj)` where `obj = Printable()`.
+/// The analyzer must emit a uses edge to `Printable.__str__`.
+#[test]
+fn test_str_builtin_emits_dunder_str() {
+    let cg = make_features_graph();
+    assert!(
+        has_uses_edge(&cg, "call_str_repr", "__str__"),
+        "call_str_repr should use Printable.__str__ via str(obj)"
+    );
+}
+
+/// `call_str_repr` calls `repr(obj)` where `obj = Printable()`.
+/// The analyzer must emit a uses edge to `Printable.__repr__`.
+#[test]
+fn test_repr_builtin_emits_dunder_repr() {
+    let cg = make_features_graph();
+    assert!(
+        has_uses_edge(&cg, "call_str_repr", "__repr__"),
+        "call_str_repr should use Printable.__repr__ via repr(obj)"
+    );
+}
+
+// ===================================================================
+// Decorator-chain call flow
+//
+// When @decorator is applied to func, the decorator is called with
+// func as its argument.  The analyzer must emit a uses edge from the
+// concrete decorator to the decorated function.
+// ===================================================================
+
+/// `@simple_decorator` applied to `simple_decorated` — the decorator
+/// receives the function as an argument, so `simple_decorator` must
+/// have a uses edge to `simple_decorated`.
+#[test]
+fn test_accuracy_decorator_uses_decorated_function() {
+    let cg = make_single_fixture_graph("accuracy_decorator.py");
+    assert!(
+        has_uses_edge(&cg, "simple_decorator", "simple_decorated"),
+        "simple_decorator should use simple_decorated (decorator receives function as argument)"
+    );
+}
+
+// ===================================================================
+// INV-2: expand_unknowns precision
+//
+// When a caller already has a *concrete* uses edge to a node named N,
+// wildcard expansion for *.N from the same caller must be suppressed.
+// This prevents false-positive fanout to unrelated classes that happen
+// to define a method with the same short name.
+// ===================================================================
+
+/// `precision_caller` in features.py:
+///   - calls `a.do_work()` → concrete uses edge to `WorkerA.do_work`
+///   - calls bare `do_work()` → creates wildcard `*.do_work`
+///
+/// Old behavior: wildcard expands to both `WorkerA.do_work` and `WorkerB.do_work`.
+/// New behavior: concrete resolution already exists for "do_work", so wildcard
+/// expansion is skipped — `WorkerB.do_work` must NOT appear in uses.
+#[test]
+fn test_expand_unknowns_scoped_by_concrete_resolution() {
+    let cg = make_features_graph();
+
+    // The concrete edge must still exist.
+    assert!(
+        has_uses_edge(&cg, "precision_caller", "do_work"),
+        "precision_caller must use do_work via concrete a.do_work(), got: {:?}",
+        get_uses(&cg, "precision_caller")
+    );
+
+    // WorkerB.do_work must NOT be reached via wildcard expansion.
+    let worker_b_do_work: Vec<usize> = find_nodes_by_name(&cg, "do_work")
+        .into_iter()
+        .filter(|&id| {
+            cg.nodes_arena[id]
+                .namespace
+                .as_deref()
+                .unwrap_or("")
+                .contains("WorkerB")
+        })
+        .collect();
+
+    let precision_caller_ids = find_nodes_by_name(&cg, "precision_caller");
+    let has_worker_b_edge = worker_b_do_work.iter().any(|&mid| {
+        precision_caller_ids.iter().any(|&fid| {
+            cg.uses_edges
+                .get(&fid)
+                .is_some_and(|targets| targets.contains(&mid))
+        })
+    });
+    assert!(
+        !has_worker_b_edge,
+        "precision_caller must not use WorkerB.do_work — wildcard expansion should be \
+         suppressed because a concrete WorkerA.do_work resolution already exists"
+    );
+}
+
+/// Helper: check that at most `max_count` distinct uses targets exist for a node.
+/// Used to verify that wildcard expansion does not globally fan out.
+fn has_concrete_uses_edge_for_name(cg: &CallGraph, from_name: &str, short_name: &str) -> bool {
+    for &fid in find_nodes_by_name(cg, from_name).iter() {
+        if let Some(targets) = cg.uses_edges.get(&fid) {
+            for &tid in targets {
+                if cg.nodes_arena[tid].name == short_name
+                    && cg.nodes_arena[tid].namespace.is_some()
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// INV-2 precision: the number of *concrete* (namespaced) `do_work` uses from
+/// `precision_caller` must be exactly 1 (WorkerA only), not more.
+/// Wildcards (*.do_work) are expected from the bare `do_work()` call and are
+/// not counted — we only care that the concrete fanout is bounded.
+#[test]
+fn test_expand_unknowns_fanout_count_bounded() {
+    let cg = make_features_graph();
+
+    // Verify concrete edge exists (WorkerA.do_work).
+    assert!(
+        has_concrete_uses_edge_for_name(&cg, "precision_caller", "do_work"),
+        "precision_caller must have at least one concrete 'do_work' uses edge"
+    );
+
+    // Count concrete (namespaced) nodes named "do_work" in precision_caller's uses set.
+    let precision_caller_ids = find_nodes_by_name(&cg, "precision_caller");
+    let concrete_do_work_count = find_nodes_by_name(&cg, "do_work")
+        .into_iter()
+        .filter(|&mid| {
+            // Only count concrete (namespaced) nodes.
+            cg.nodes_arena[mid].namespace.is_some()
+                && precision_caller_ids.iter().any(|&fid| {
+                    cg.uses_edges
+                        .get(&fid)
+                        .is_some_and(|targets| targets.contains(&mid))
+                })
+        })
+        .count();
+
+    assert!(
+        concrete_do_work_count <= 1,
+        "precision_caller should use at most 1 concrete 'do_work' node (WorkerA only), \
+         got {concrete_do_work_count} — wildcard expansion is too broad"
+    );
+}

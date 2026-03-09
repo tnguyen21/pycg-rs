@@ -1019,7 +1019,7 @@ impl CallGraph {
         );
 
         // Analyze decorators and determine flavor
-        let (self_name, flavor) = self.analyze_function_def(node, line_index);
+        let (self_name, flavor, deco_ids) = self.analyze_function_def(node, line_index);
 
         let from_node = self.get_node_of_current_namespace();
         let ns = self.nodes_arena[from_node].get_name();
@@ -1035,6 +1035,20 @@ impl CallGraph {
         let line = line_index.line_index(node.range().start()).get();
         self.associate_node(to_node, &self.filename.clone(), line);
         self.set_value(&func_name, Some(to_node));
+
+        // Decorator-chain call flow: each concrete (non-wildcard) decorator receives
+        // the function as its argument, so emit decorator -> function uses edges.
+        for &deco_id in &deco_ids {
+            if self.nodes_arena[deco_id].namespace.is_some() {
+                if self.add_uses_edge(deco_id, to_node) {
+                    info!(
+                        "New edge added: decorator {} uses function {}",
+                        self.nodes_arena[deco_id].get_name(),
+                        self.nodes_arena[to_node].get_name()
+                    );
+                }
+            }
+        }
 
         // Enter function scope
         self.name_stack.push(func_name.clone());
@@ -1104,13 +1118,15 @@ impl CallGraph {
         &mut self,
         node: &StmtFunctionDef,
         line_index: &LineIndex,
-    ) -> (Option<String>, Flavor) {
-        // Visit decorators
+    ) -> (Option<String>, Flavor, Vec<NodeId>) {
+        // Visit decorators; collect resolved node IDs for decorator-chain flow.
         let mut deco_names = Vec::new();
+        let mut deco_ids: Vec<NodeId> = Vec::new();
         for deco in &node.decorator_list {
             let deco_node = self.visit_expr(&deco.expression, line_index);
             if let Some(did) = deco_node {
                 deco_names.push(self.nodes_arena[did].name.clone());
+                deco_ids.push(did);
             }
         }
 
@@ -1142,7 +1158,7 @@ impl CallGraph {
             None
         };
 
-        (self_name, flavor)
+        (self_name, flavor, deco_ids)
     }
 
     fn generate_args_nodes(&mut self, params: &Parameters, inner_ns: &str) {
@@ -1578,7 +1594,32 @@ impl CallGraph {
 
     fn visit_delete(&mut self, node: &StmtDelete, line_index: &LineIndex) {
         for target in &node.targets {
-            self.visit_expr(target, line_index);
+            match target {
+                Expr::Attribute(a) => {
+                    // `del obj.attr` → emit __delattr__ protocol edge when receiver is known.
+                    let obj_ids = self.get_obj_ids_for_expr(&a.value);
+                    for obj_id in obj_ids {
+                        if self.class_base_ast_info.contains_key(&obj_id) {
+                            self.emit_protocol_edges(obj_id, &["__delattr__"]);
+                        }
+                    }
+                }
+                Expr::Subscript(s) => {
+                    // `del obj[key]` → emit __delitem__ protocol edge when receiver is known.
+                    let obj_ids = self.get_obj_ids_for_expr(&s.value);
+                    for obj_id in obj_ids {
+                        if self.class_base_ast_info.contains_key(&obj_id) {
+                            self.emit_protocol_edges(obj_id, &["__delitem__"]);
+                        }
+                    }
+                    // Visit the subscript key for any side-effect calls.
+                    self.visit_expr(&s.slice, line_index);
+                }
+                _ => {
+                    // `del name` — local unbind only, no protocol edge.
+                    self.visit_expr(target, line_index);
+                }
+            }
         }
     }
 
@@ -2305,6 +2346,11 @@ impl CallGraph {
     // =====================================================================
 
     /// Resolve a call expression to a known builtin result.
+    ///
+    /// Handles:
+    /// - `super()` → resolve to parent class in MRO
+    /// - `str(x)` / `repr(x)` → emit `__str__`/`__repr__` protocol edge on x's class;
+    ///   returns None (str/repr produce strings, which aren't tracked nodes)
     fn resolve_builtins_from_call(
         &mut self,
         node: &ExprCall,
@@ -2314,6 +2360,19 @@ impl CallGraph {
             let name = func_name.id.as_str();
             if name == "super" {
                 return self.resolve_super();
+            }
+            if name == "str" || name == "repr" {
+                // Emit __str__ / __repr__ protocol edge on the argument's class.
+                let method: &'static str = if name == "str" { "__str__" } else { "__repr__" };
+                if let Some(arg) = node.arguments.args.first() {
+                    let obj_ids = self.get_obj_ids_for_expr(arg);
+                    for obj_id in obj_ids {
+                        if self.class_base_ast_info.contains_key(&obj_id) {
+                            self.emit_protocol_edges(obj_id, &[method]);
+                        }
+                    }
+                }
+                return None; // str/repr return strings — not a tracked type node
             }
         }
         None
@@ -2444,8 +2503,25 @@ impl CallGraph {
 
     /// For each unknown node `*.name`, replace all its incoming edges
     /// with edges to `X.name` for all possible Xs.
+    ///
+    /// Precision heuristic (INV-2): if a caller already has a *concrete*
+    /// uses edge to any node named `name`, skip wildcard expansion for that
+    /// `(caller, name)` pair.  This prevents broad false-positive fanout when
+    /// the abstract-value machinery has already produced a better resolution.
     fn expand_unknowns(&mut self) {
-        // Collect new defines edges
+        // Build index of (from_id, short_name) pairs that already have a
+        // concrete (namespaced) uses edge.  Wildcards whose (from, name) are
+        // covered by a concrete edge will be suppressed.
+        let mut concrete_uses_pairs: HashSet<(NodeId, String)> = HashSet::new();
+        for (&from, targets) in &self.uses_edges {
+            for &to in targets {
+                if self.nodes_arena[to].namespace.is_some() {
+                    concrete_uses_pairs.insert((from, self.nodes_arena[to].name.clone()));
+                }
+            }
+        }
+
+        // Collect new defines edges (unchanged — no precision scoping for defines).
         let mut new_defines: Vec<(NodeId, NodeId)> = Vec::new();
         for (&from, targets) in &self.defines_edges {
             for &to in targets {
@@ -2465,12 +2541,18 @@ impl CallGraph {
             self.add_defines_edge(from, Some(to));
         }
 
-        // Collect new uses edges
+        // Collect new uses edges — skip when a concrete resolution already exists
+        // for the same (from, name) pair (precision heuristic).
         let mut new_uses: Vec<(NodeId, NodeId)> = Vec::new();
         for (&from, targets) in &self.uses_edges {
             for &to in targets {
                 if self.nodes_arena[to].namespace.is_none() {
                     let name = self.nodes_arena[to].name.clone();
+                    // Suppress global fanout when the caller already has a
+                    // concrete resolution for this short name.
+                    if concrete_uses_pairs.contains(&(from, name.clone())) {
+                        continue;
+                    }
                     if let Some(ids) = self.nodes_by_name.get(&name) {
                         for &candidate in ids {
                             if self.nodes_arena[candidate].namespace.is_some() {

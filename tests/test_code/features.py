@@ -315,3 +315,38 @@ def local_noise_example(items):
     """Unresolved local `x` should not produce a wildcard UNKNOWN node."""
     x = len(items)  # noqa: F841  # test fixture
     return items
+
+
+# --- str/repr builtin protocol ---
+
+class Printable:
+    def __str__(self):
+        return "printable"
+
+    def __repr__(self):
+        return "Printable()"
+
+
+def call_str_repr():
+    obj = Printable()
+    s = str(obj)   # noqa: F841  # → __str__ protocol edge
+    r = repr(obj)  # noqa: F841  # → __repr__ protocol edge
+
+
+# --- expand_unknowns precision ---
+
+class WorkerA:
+    def do_work(self):
+        pass
+
+
+class WorkerB:
+    def do_work(self):
+        pass
+
+
+def precision_caller():
+    """Concrete WorkerA.do_work resolution should scope-limit wildcard expansion."""
+    a = WorkerA()
+    a.do_work()  # concrete: WorkerA.do_work
+    do_work()    # noqa: F821  # bare call → wildcard *.do_work
