@@ -683,3 +683,372 @@ fn test_corpus_flask() {
     // flask has 18 source files, several classes (Flask, Blueprint, etc.)
     assert_corpus_healthy("flask", &stats, 8, 5, 20, 15);
 }
+
+// ===================================================================
+// Golden accuracy harness
+//
+// Captures the hard call-resolution cases before the analyzer is
+// refactored.  Each section asserts concrete uses/defines edges for a
+// specific accuracy scenario.  Known gaps are marked with #[ignore] and
+// a "GAP:" prefix so they become passing tests once the corresponding
+// analyzer improvement lands.
+//
+// Fixtures live in tests/test_code/accuracy_*.py and
+// tests/test_code/accuracy_*/; they are small curated snippets adapted
+// from PyCG micro-benchmark cases (pycallgraph-rs/PyCG/) and pyan
+// (pycallgraph-rs/pyan/), but only the minimal code needed is copied.
+// ===================================================================
+
+/// Build a CallGraph from a single accuracy fixture file (no root).
+fn make_single_fixture_graph(fixture_name: &str) -> CallGraph {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("test_code")
+        .join(fixture_name);
+    let files = vec![path.to_string_lossy().to_string()];
+    CallGraph::new(&files, None)
+        .unwrap_or_else(|e| panic!("failed to parse {fixture_name}: {e}"))
+}
+
+/// Build a CallGraph from multiple accuracy fixture files with `tests/` as root.
+fn make_multi_fixture_graph(fixture_relative_paths: &[&str]) -> CallGraph {
+    let test_code = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let files: Vec<String> = fixture_relative_paths
+        .iter()
+        .map(|p| test_code.join(p).to_string_lossy().to_string())
+        .collect();
+    let root = test_code.to_string_lossy().to_string();
+    CallGraph::new(&files, Some(&root))
+        .unwrap_or_else(|e| panic!("failed to parse multi-file fixture: {e}"))
+}
+
+// -------------------------------------------------------------------
+// Alias / rebinding accuracy
+//
+// Adapted from PyCG micro-benchmark assignments/chained and
+// functions/assigned_call.  Tests that assigning a function to a
+// variable and calling through the alias produces the correct uses edge,
+// and that chained rebinding (a = b = f1; a = b = f2) tracks both.
+// -------------------------------------------------------------------
+
+#[test]
+fn test_accuracy_simple_alias() {
+    // a = target_one; a() — must produce uses edge to target_one.
+    let cg = make_single_fixture_graph("accuracy_alias.py");
+    assert!(
+        has_uses_edge(&cg, "simple_alias_caller", "target_one"),
+        "simple_alias_caller should use target_one via alias"
+    );
+    // Must NOT spuriously add target_two (only target_one was aliased).
+    let uses = get_uses(&cg, "simple_alias_caller");
+    assert!(
+        !uses.contains("target_two"),
+        "simple_alias_caller must not use target_two, got: {uses:?}"
+    );
+}
+
+#[test]
+fn test_accuracy_chained_alias() {
+    // a = b = target_one; b()  then  a = b = target_two; a() — both must be tracked.
+    let cg = make_single_fixture_graph("accuracy_alias.py");
+    assert!(
+        has_uses_edge(&cg, "chained_alias_caller", "target_one"),
+        "chained_alias_caller should use target_one (first chained binding)"
+    );
+    assert!(
+        has_uses_edge(&cg, "chained_alias_caller", "target_two"),
+        "chained_alias_caller should use target_two (second chained binding after rebind)"
+    );
+}
+
+// -------------------------------------------------------------------
+// Factory / return-value accuracy
+//
+// Adapted from PyCG micro-benchmark returns/call and
+// classes/return_call.  Tests that:
+//   - factory() creating a Product emits a uses edge factory -> Product
+//   - consumer() calling factory() emits consumer -> factory
+//   - (GAP) result.make() after an opaque return is currently NOT tracked
+// -------------------------------------------------------------------
+
+#[test]
+fn test_accuracy_factory_call_tracked() {
+    // consumer() calls factory() — uses edge must exist.
+    let cg = make_single_fixture_graph("accuracy_factory.py");
+    assert!(
+        has_uses_edge(&cg, "consumer", "factory"),
+        "consumer should use factory (direct function call)"
+    );
+}
+
+#[test]
+fn test_accuracy_factory_constructs_product() {
+    // factory() creates Product() — uses edge factory -> Product must exist.
+    let cg = make_single_fixture_graph("accuracy_factory.py");
+    assert!(
+        has_uses_edge(&cg, "factory", "Product"),
+        "factory should use Product (constructor call inside factory body)"
+    );
+}
+
+/// GAP: opaque call result — result = factory(); result.make() does not
+/// currently produce a uses edge to Product.make because the return-value
+/// type is not propagated through single-value bindings.
+#[test]
+#[ignore = "GAP: opaque return value — result.make() not tracked through factory() result binding"]
+fn test_accuracy_factory_return_method_gap() {
+    let cg = make_single_fixture_graph("accuracy_factory.py");
+    assert!(
+        has_uses_edge(&cg, "consumer", "make"),
+        "consumer should use Product.make via return-value chain (not yet implemented)"
+    );
+}
+
+// -------------------------------------------------------------------
+// Decorator flow accuracy
+//
+// Adapted from PyCG micro-benchmark decorators/call, decorators/param_call.
+// Tests that applying a decorator creates a module-level uses edge and
+// that callers of the decorated function are correctly wired.
+// -------------------------------------------------------------------
+
+#[test]
+fn test_accuracy_simple_decorator_applied() {
+    // @simple_decorator on a function — module must use simple_decorator.
+    let cg = make_single_fixture_graph("accuracy_decorator.py");
+    assert!(
+        has_uses_edge(&cg, "accuracy_decorator", "simple_decorator"),
+        "module should use simple_decorator (applied as @simple_decorator)"
+    );
+}
+
+#[test]
+fn test_accuracy_factory_decorator_applied() {
+    // @factory_decorator("arg") — module must use factory_decorator.
+    let cg = make_single_fixture_graph("accuracy_decorator.py");
+    assert!(
+        has_uses_edge(&cg, "accuracy_decorator", "factory_decorator"),
+        "module should use factory_decorator (applied as @factory_decorator(...))"
+    );
+}
+
+#[test]
+fn test_accuracy_caller_uses_decorated_functions() {
+    // call_decorated() calls both decorated functions.
+    let cg = make_single_fixture_graph("accuracy_decorator.py");
+    assert!(
+        has_uses_edge(&cg, "call_decorated", "simple_decorated"),
+        "call_decorated should use simple_decorated"
+    );
+    assert!(
+        has_uses_edge(&cg, "call_decorated", "factory_decorated"),
+        "call_decorated should use factory_decorated"
+    );
+}
+
+// -------------------------------------------------------------------
+// Container / subscript call accuracy
+//
+// Adapted from PyCG micro-benchmark lists/simple, dicts.
+// Tests that calling functions via list[i]() and dict[key]() produces
+// the correct uses edges for all contained function references.
+// -------------------------------------------------------------------
+
+#[test]
+fn test_accuracy_list_subscript_call() {
+    // funcs = [func_a, func_b]; funcs[0](); funcs[1]()
+    let cg = make_single_fixture_graph("accuracy_container.py");
+    assert!(
+        has_uses_edge(&cg, "list_subscript_caller", "func_a"),
+        "list_subscript_caller should use func_a (funcs[0]())"
+    );
+    assert!(
+        has_uses_edge(&cg, "list_subscript_caller", "func_b"),
+        "list_subscript_caller should use func_b (funcs[1]())"
+    );
+}
+
+#[test]
+fn test_accuracy_dict_subscript_call() {
+    // dispatch = {"a": func_a, "c": func_c}; dispatch["a"](); dispatch["c"]()
+    let cg = make_single_fixture_graph("accuracy_container.py");
+    assert!(
+        has_uses_edge(&cg, "dict_subscript_caller", "func_a"),
+        "dict_subscript_caller should use func_a (dispatch[\"a\"]())"
+    );
+    assert!(
+        has_uses_edge(&cg, "dict_subscript_caller", "func_c"),
+        "dict_subscript_caller should use func_c (dispatch[\"c\"]())"
+    );
+}
+
+// -------------------------------------------------------------------
+// from-star-import accuracy
+//
+// Adapted from PyCG micro-benchmark imports/import_all.
+// Tests that `from module import *` followed by calling the imported
+// names produces correct uses edges even though names were not listed
+// explicitly in the import statement.
+// -------------------------------------------------------------------
+
+#[test]
+fn test_accuracy_star_import_calls_resolve() {
+    // star_import_caller() calls exported_func1() and exported_func2() after
+    // `from accuracy_star_src import *` — both uses edges must exist.
+    let cg = make_multi_fixture_graph(&[
+        "test_code/accuracy_star_src.py",
+        "test_code/accuracy_star_user.py",
+    ]);
+    assert!(
+        has_uses_edge(&cg, "star_import_caller", "exported_func1"),
+        "star_import_caller should use exported_func1 (resolved via star import)"
+    );
+    assert!(
+        has_uses_edge(&cg, "star_import_caller", "exported_func2"),
+        "star_import_caller should use exported_func2 (resolved via star import)"
+    );
+}
+
+// -------------------------------------------------------------------
+// Import re-export chain accuracy
+//
+// Adapted from PyCG micro-benchmark imports/chained_import.
+// Tests the case where pkg/__init__.py re-exports a function from
+// pkg/impl.py, and a user module imports via the package.
+//
+// Currently: the __init__.py import itself IS tracked (package uses
+// reexport_func), but the downstream binding in the user module is
+// NOT propagated (reexport_caller gets no uses edge).  The gap is
+// documented with #[ignore].
+// -------------------------------------------------------------------
+
+#[test]
+fn test_accuracy_reexport_package_import_tracked() {
+    // accuracy_reexport/__init__.py does `from ...impl import reexport_func`
+    // That import must appear as a uses edge on the package module node.
+    let cg = make_multi_fixture_graph(&[
+        "test_code/accuracy_reexport/__init__.py",
+        "test_code/accuracy_reexport/impl.py",
+        "test_code/accuracy_reexport/user.py",
+    ]);
+    assert!(
+        has_uses_edge(&cg, "accuracy_reexport", "reexport_func"),
+        "accuracy_reexport package __init__ should use reexport_func (import in __init__)"
+    );
+}
+
+/// GAP: shallow import/binding propagation — when a user module imports a
+/// function via a package re-export (`from pkg import fn` where pkg's
+/// __init__ re-exports fn from pkg.impl), the uses edge from the caller
+/// to fn is currently not emitted.
+#[test]
+#[ignore = "GAP: import binding through __init__ re-export not propagated to caller uses edges"]
+fn test_accuracy_reexport_chain_caller_gap() {
+    let cg = make_multi_fixture_graph(&[
+        "test_code/accuracy_reexport/__init__.py",
+        "test_code/accuracy_reexport/impl.py",
+        "test_code/accuracy_reexport/user.py",
+    ]);
+    assert!(
+        has_uses_edge(&cg, "reexport_caller", "reexport_func"),
+        "reexport_caller should use reexport_func via package re-export chain (not yet implemented)"
+    );
+}
+
+// -------------------------------------------------------------------
+// Starred unpacking accuracy
+//
+// Tests the `a, b, *c = ...` / `a, *b, c = ...` / `*a, b = ...`
+// assignment patterns from features.py.  The analyzer currently tracks
+// constructor calls for all RHS values; method calls on positionally-
+// bound (non-starred) targets are a known gap.
+// -------------------------------------------------------------------
+
+#[test]
+fn test_accuracy_starred_unpack_constructors_tracked() {
+    // All four constructors must be tracked in uses regardless of star position.
+    let cg = make_features_graph();
+    // star_at_end: a, b, *c = Alpha(), Beta(), Gamma(), Delta()
+    assert!(has_uses_edge(&cg, "star_at_end", "Alpha"), "star_at_end must use Alpha");
+    assert!(has_uses_edge(&cg, "star_at_end", "Beta"),  "star_at_end must use Beta");
+    assert!(has_uses_edge(&cg, "star_at_end", "Gamma"), "star_at_end must use Gamma");
+    assert!(has_uses_edge(&cg, "star_at_end", "Delta"), "star_at_end must use Delta");
+    // star_in_middle: a, *b, c = Alpha(), Beta(), Gamma(), Delta()
+    assert!(has_uses_edge(&cg, "star_in_middle", "Alpha"), "star_in_middle must use Alpha");
+    assert!(has_uses_edge(&cg, "star_in_middle", "Delta"), "star_in_middle must use Delta");
+    // star_at_start: *a, b = Alpha(), Beta(), Gamma()
+    assert!(has_uses_edge(&cg, "star_at_start", "Gamma"), "star_at_start must use Gamma");
+}
+
+/// GAP: method calls on positionally-bound starred-unpack targets are not
+/// resolved when the target is assigned through an explicit (non-starred)
+/// position in the tuple.  e.g. `a, b, *c = Alpha(), Beta(), ...; a.alpha_method()`
+/// — `a` is known to be Alpha() at position 0, but method resolution is lost.
+#[test]
+#[ignore = "GAP: method resolution on explicit starred-unpack targets (a in a,b,*c=...) not tracked"]
+fn test_accuracy_starred_unpack_explicit_target_methods_gap() {
+    let cg = make_features_graph();
+    // a is first element (Alpha), b is second element (Beta)
+    assert!(
+        has_uses_edge(&cg, "star_at_end", "alpha_method"),
+        "star_at_end should use alpha_method via a.alpha_method() (a = Alpha())"
+    );
+    assert!(
+        has_uses_edge(&cg, "star_at_end", "beta_method"),
+        "star_at_end should use beta_method via b.beta_method() (b = Beta())"
+    );
+}
+
+// -------------------------------------------------------------------
+// Chained-call regression (submodule1.py)
+//
+// The canonical hard case: B.get_a_via_A() calls self.to_A() and then
+// passes the chained attribute access self.to_A().b.a to test_func1().
+// The analyzer must at minimum track the outer call (to_A) and the
+// enclosing call (test_func1); deeper chain resolution through the
+// opaque return is a known gap.
+// -------------------------------------------------------------------
+
+fn make_submodule_graph() -> CallGraph {
+    make_multi_fixture_graph(&[
+        "test_code/submodule1.py",
+        "test_code/submodule2.py",
+        "test_code/subpackage1/__init__.py",
+        "test_code/subpackage1/submodule1.py",
+    ])
+}
+
+#[test]
+fn test_accuracy_chained_call_outer_tracked() {
+    // get_a_via_A calls self.to_A() — uses edge to to_A must exist.
+    let cg = make_submodule_graph();
+    assert!(
+        has_uses_edge(&cg, "get_a_via_A", "to_A"),
+        "get_a_via_A should use to_A (self.to_A() is the chain head)"
+    );
+}
+
+#[test]
+fn test_accuracy_chained_call_enclosing_func_tracked() {
+    // get_a_via_A calls test_func1(...) as the outer wrapper call.
+    let cg = make_submodule_graph();
+    assert!(
+        has_uses_edge(&cg, "get_a_via_A", "test_func1"),
+        "get_a_via_A should use test_func1 (outermost call around chain)"
+    );
+}
+
+/// GAP: deep chained attribute access through an opaque return value.
+/// `self.to_A()` returns an `A` instance; `.b` is an attribute of that
+/// instance.  The analyzer does not propagate the return type, so the
+/// attribute chain `.b.a` after `to_A()` is not resolved.
+#[test]
+#[ignore = "GAP: attribute access on opaque call result (to_A().b) not resolved to A's members"]
+fn test_accuracy_chained_call_deep_chain_gap() {
+    let cg = make_submodule_graph();
+    // Ideal: get_a_via_A -> A (via to_A's return type propagation)
+    assert!(
+        has_uses_edge(&cg, "get_a_via_A", "A"),
+        "get_a_via_A should use A (return type of to_A() should be tracked)"
+    );
+}
