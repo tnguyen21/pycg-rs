@@ -101,10 +101,7 @@ cargo test
 This is an MVP port. Not yet implemented:
 
 - PyO3 Python bindings
-- SVG/HTML output (pipe DOT to graphviz instead)
-- yEd GraphML output
 - Module-level dependency analysis mode
-- Sphinx documentation plugin
 - Context manager protocol edges (`__enter__`/`__exit__`)
 - Iterator protocol edges (`__iter__`/`__next__`)
 - `super()` resolution
