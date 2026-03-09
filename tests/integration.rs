@@ -1650,3 +1650,106 @@ fn test_expand_unknowns_fanout_count_bounded() {
          got {concrete_do_work_count} — wildcard expansion is too broad"
     );
 }
+
+// ===================================================================
+// INV-1: __all__-aware star-import resolution
+//
+// When the source module defines `__all__ = [...]` with statically
+// known string literals, `from src import *` must inject exactly those
+// names and no others, even if some listed names are private (_-prefixed)
+// and some unlisted names are public.
+// ===================================================================
+
+/// Names listed in `__all__` — including a private one — must resolve
+/// after `from star_all_src import *`.
+#[test]
+fn test_star_import_all_exports_listed_names_resolve() {
+    let cg = make_multi_fixture_graph(&[
+        "test_code/star_all_src.py",
+        "test_code/star_all_user.py",
+    ]);
+    // public_exported is in __all__ → must resolve concretely.
+    assert!(
+        has_concrete_uses_edge(&cg, "all_aware_caller", "public_exported"),
+        "all_aware_caller must concretely use public_exported (listed in __all__)"
+    );
+    // _special_exported is private but explicitly in __all__ → must resolve.
+    assert!(
+        has_concrete_uses_edge(&cg, "all_aware_caller", "_special_exported"),
+        "all_aware_caller must concretely use _special_exported \
+         (private but explicitly in __all__ — INV-1)"
+    );
+}
+
+/// A public name absent from `__all__` must NOT be concretely resolved
+/// after `from star_all_src import *`.
+#[test]
+fn test_star_import_all_excludes_unlisted_public() {
+    let cg = make_multi_fixture_graph(&[
+        "test_code/star_all_src.py",
+        "test_code/star_all_user.py",
+    ]);
+    // public_not_exported is public but NOT in __all__ → must not resolve concretely.
+    assert!(
+        !has_concrete_uses_edge(&cg, "all_aware_caller", "public_not_exported"),
+        "all_aware_caller must NOT concretely use public_not_exported \
+         (public but not in __all__ — INV-1)"
+    );
+}
+
+/// A private name absent from `__all__` must NOT be concretely resolved
+/// after `from star_all_src import *`, and wildcard expansion must not
+/// reattach it (INV-3).
+#[test]
+fn test_star_import_all_excludes_unlisted_private() {
+    let cg = make_multi_fixture_graph(&[
+        "test_code/star_all_src.py",
+        "test_code/star_all_user.py",
+    ]);
+    // _private_not_exported is private and NOT in __all__ → must not resolve.
+    assert!(
+        !has_concrete_uses_edge(&cg, "all_aware_caller", "_private_not_exported"),
+        "all_aware_caller must NOT concretely use _private_not_exported \
+         (private, not in __all__, expand_unknowns must not resurrect it — INV-3)"
+    );
+}
+
+// ===================================================================
+// INV-2 / INV-3: Privacy filter without __all__
+//
+// Without an `__all__`, `from src import *` must inject only public
+// names.  Private names must remain unresolved, and `expand_unknowns`
+// must not reattach them.
+// ===================================================================
+
+/// Public name without `__all__` must resolve via star import.
+#[test]
+fn test_star_import_no_all_public_resolves() {
+    let cg = make_multi_fixture_graph(&[
+        "test_code/star_private_src.py",
+        "test_code/star_private_user.py",
+    ]);
+    assert!(
+        has_concrete_uses_edge(&cg, "privacy_checker", "public_func"),
+        "privacy_checker must concretely use public_func \
+         (public name, no __all__ — existing public star-import must keep working)"
+    );
+}
+
+/// Private name without `__all__` must NOT resolve via star import, and
+/// `expand_unknowns` must not resurrect it through global short-name fanout.
+#[test]
+fn test_star_import_no_all_private_stays_unresolved() {
+    let cg = make_multi_fixture_graph(&[
+        "test_code/star_private_src.py",
+        "test_code/star_private_user.py",
+    ]);
+    // _private_impl was filtered out during star import (INV-2) and must
+    // not be reconnected by expand_unknowns (INV-3).
+    assert!(
+        !has_concrete_uses_edge(&cg, "privacy_checker", "_private_impl"),
+        "privacy_checker must NOT concretely use _private_impl \
+         (private name excluded by star-import filter; \
+          expand_unknowns must not resurrect it — INV-2 + INV-3)"
+    );
+}

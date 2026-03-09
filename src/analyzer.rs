@@ -37,6 +37,16 @@ struct ScopeInfo {
     name: String,
     defs: HashMap<String, ValueSet>,
     locals: HashSet<String>,
+    /// Statically-known `__all__` exports for this module scope.
+    ///
+    /// `Some(names)` when the module contains a top-level `__all__ = [...]`
+    /// whose elements are all string literals; `None` otherwise (either
+    /// because `__all__` is absent or because it is not statically analyzable).
+    ///
+    /// When `Some`, `handle_star_import` uses this as the definitive filter
+    /// for `from mod import *`, allowing private names that are explicitly
+    /// listed and excluding public names that are not.
+    all_exports: Option<HashSet<String>>,
 }
 
 impl ScopeInfo {
@@ -45,6 +55,7 @@ impl ScopeInfo {
             name: name.to_string(),
             defs: HashMap::new(),
             locals: HashSet::new(),
+            all_exports: None,
         }
     }
 
@@ -58,8 +69,34 @@ impl ScopeInfo {
             name: name.to_string(),
             defs,
             locals,
+            all_exports: None,
         }
     }
+}
+
+/// Extract the exported names from a `__all__ = [...]` or `__all__ = (...)`
+/// literal expression.
+///
+/// Returns `Some(names)` only when every element is a plain string literal.
+/// If any element is not a string literal (e.g. a variable reference or a
+/// computed expression) we conservatively return `None` so that callers fall
+/// back to the default privacy filter.
+fn extract_all_exports(expr: &Expr) -> Option<HashSet<String>> {
+    let elts = match expr {
+        Expr::List(l) => &l.elts,
+        Expr::Tuple(t) => &t.elts,
+        _ => return None,
+    };
+    let mut names = HashSet::new();
+    for elt in elts {
+        if let Expr::StringLiteral(s) = elt {
+            names.insert(s.value.to_str().to_string());
+        } else {
+            // Non-literal element — not statically analyzable.
+            return None;
+        }
+    }
+    Some(names)
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +287,10 @@ impl CallGraph {
                 for (name, vs) in sc.defs {
                     existing.defs.entry(name).or_default().union_with(&vs);
                 }
+                // Propagate __all__ if newly discovered.
+                if existing.all_exports.is_none() && sc.all_exports.is_some() {
+                    existing.all_exports = sc.all_exports;
+                }
             } else {
                 self.scopes.insert(ns, sc);
             }
@@ -297,6 +338,15 @@ impl CallGraph {
                 }
                 Stmt::Assign(a) => {
                     for target in &a.targets {
+                        // Detect `__all__ = [...]` or `__all__ = (...)` and
+                        // record the statically-known export list.
+                        if let Expr::Name(n) = target {
+                            if n.id.as_str() == "__all__" {
+                                if let Some(exports) = extract_all_exports(&a.value) {
+                                    scope.all_exports = Some(exports);
+                                }
+                            }
+                        }
                         self.collect_assign_target_names(target, scope);
                     }
                 }
@@ -1354,23 +1404,39 @@ impl CallGraph {
         }
     }
 
-    /// Inject all public names from `tgt_module` into the current scope.
+    /// Inject exported names from `tgt_module` into the current scope.
     ///
-    /// Used by `from mod import *`.  Only names with non-empty ValueSets in
-    /// the source module's scope are copied; empty placeholders are skipped
-    /// (they would produce dead wildcard references).  Private names
-    /// (starting with `_`) are skipped unless explicitly listed in `__all__`.
+    /// Used by `from mod import *`.  The filter is:
+    ///
+    /// - If the source module declares `__all__` with statically-knowable
+    ///   string literals, only those names are injected (even private ones
+    ///   that are explicitly listed, excluding public names that are not).
+    /// - Otherwise, all non-private (no leading `_`) names with non-empty
+    ///   ValueSets are injected.
+    ///
+    /// Empty-ValueSet placeholders are always skipped (they produce dead
+    /// wildcard references with no useful information).
     fn handle_star_import(&mut self, from_node: NodeId, tgt_module: &str) {
         // Collect the source module's bindings while holding an immutable
         // borrow on self.scopes.
         let bindings: Vec<(String, ValueSet)> =
             if let Some(scope) = self.scopes.get(tgt_module) {
+                let all_exports = scope.all_exports.clone();
                 scope
                     .defs
                     .iter()
                     .filter(|(name, vs)| {
-                        // Skip private names and empty placeholders.
-                        !name.starts_with('_') && !vs.is_empty()
+                        // Always skip empty placeholders.
+                        if vs.is_empty() {
+                            return false;
+                        }
+                        // If __all__ is statically known, use it as the
+                        // definitive export list (INV-1).
+                        if let Some(ref exports) = all_exports {
+                            return exports.contains(name.as_str());
+                        }
+                        // No __all__: skip private names (INV-2).
+                        !name.starts_with('_')
                     })
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect()
@@ -2548,6 +2614,15 @@ impl CallGraph {
             for &to in targets {
                 if self.nodes_arena[to].namespace.is_none() {
                     let name = self.nodes_arena[to].name.clone();
+                    // INV-3: Do not fan out private names globally.
+                    // A private name that was filtered by star-import should
+                    // remain unresolved rather than being reattached to an
+                    // unrelated module's private function with the same short
+                    // name.  Within-module private calls are already handled
+                    // by scope analysis and will appear in concrete_uses_pairs.
+                    if name.starts_with('_') {
+                        continue;
+                    }
                     // Suppress global fanout when the caller already has a
                     // concrete resolution for this short name.
                     if concrete_uses_pairs.contains(&(from, name.clone())) {
@@ -2555,7 +2630,21 @@ impl CallGraph {
                     }
                     if let Some(ids) = self.nodes_by_name.get(&name) {
                         for &candidate in ids {
-                            if self.nodes_arena[candidate].namespace.is_some() {
+                            if let Some(ref ns) = self.nodes_arena[candidate].namespace.clone() {
+                                // INV-1: If the candidate's module defines __all__ and
+                                // this name is not listed, skip the expansion.  Such a
+                                // name is intentionally unexported; an unresolved call
+                                // to it must not be attributed to the module's private
+                                // implementation.
+                                if !ns.is_empty() {
+                                    if let Some(scope) = self.scopes.get(ns) {
+                                        if let Some(ref exports) = scope.all_exports.clone() {
+                                            if !exports.contains(&name) {
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
                                 new_uses.push((from, candidate));
                             }
                         }
