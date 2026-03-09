@@ -1,6 +1,6 @@
-//! Integration tests mirroring the Python pyan test suite.
+//! Integration tests for pyan-rs.
 //!
-//! Uses the same test_code/ fixtures from the parent project.
+//! Uses Python test fixtures in tests/test_code/ and tests/old_tests/.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -11,8 +11,6 @@ use pyan_rs::writer;
 
 fn test_code_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
         .join("tests")
         .join("test_code")
 }
@@ -45,7 +43,6 @@ fn find_nodes_by_name(cg: &CallGraph, name: &str) -> Vec<usize> {
         .get(name)
         .cloned()
         .unwrap_or_default();
-    // Also search by full name match (e.g. "test_code.submodule2")
     for (idx, node) in cg.nodes_arena.iter().enumerate() {
         if node.get_name() == name || node.get_name().ends_with(&format!(".{name}")) {
             if !result.contains(&idx) {
@@ -111,7 +108,7 @@ fn has_uses_edge(cg: &CallGraph, from_name: &str, to_name: &str) -> bool {
 }
 
 // ===================================================================
-// test_analyzer.py equivalents
+// Core analysis tests
 // ===================================================================
 
 #[test]
@@ -142,14 +139,12 @@ fn test_function_found() {
         .filter(|n| matches!(n.flavor, pyan_rs::node::Flavor::Function | pyan_rs::node::Flavor::Method))
         .map(|n| n.name.clone())
         .collect();
-    // submodule1 has test_func1() and test_func2()
     assert!(functions.contains(&"test_func1".to_string()), "test_func1 not found, got: {:?}", functions);
 }
 
 #[test]
 fn test_submodule_defines() {
     let cg = make_call_graph(&test_code_dir());
-    // test_code.submodule2 should define test_2
     let defs = get_defines(&cg, "submodule2");
     assert!(defs.contains("test_2"), "submodule2 should define test_2, got: {:?}", defs);
 }
@@ -157,7 +152,6 @@ fn test_submodule_defines() {
 #[test]
 fn test_uses_edge_exists() {
     let cg = make_call_graph(&test_code_dir());
-    // test_2 calls submodule1.test_func2(a) + b.test_func1(a)
     let uses = get_uses(&cg, "test_2");
     assert!(
         uses.contains("test_func1") || uses.contains("test_func2"),
@@ -226,7 +220,6 @@ fn test_tgf_output_valid() {
     );
     let tgf = writer::write_tgf(&vg);
     assert!(tgf.contains('#'), "TGF should have # separator");
-    // Check edges section exists with U or D markers
     let parts: Vec<&str> = tgf.splitn(2, '#').collect();
     assert_eq!(parts.len(), 2);
     let edges_section = parts[1].trim();
@@ -252,7 +245,6 @@ fn test_text_output_valid() {
     );
     let text = writer::write_text(&vg);
     assert!(text.contains("[D]") || text.contains("[U]"), "Text should have tagged edges");
-    // Check structure: non-indented lines are sources, indented are edges
     for line in text.lines() {
         if line.starts_with("    ") {
             assert!(
@@ -264,49 +256,17 @@ fn test_text_output_valid() {
 }
 
 // ===================================================================
-// End-to-end: analyze this repo (pyan itself)
-// ===================================================================
-
-#[test]
-fn test_analyze_pyan_source() {
-    let pyan_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("pyan");
-    let files = collect_py_files(&pyan_dir);
-    assert!(!files.is_empty(), "Should find pyan source files");
-
-    let root = pyan_dir.parent().unwrap().to_string_lossy().to_string();
-    let cg = CallGraph::new(&files, Some(&root)).expect("Should analyze pyan source");
-
-    // Verify some known structures
-    assert!(has_defines_edge(&cg, "CallGraphVisitor", "__init__"),
-            "CallGraphVisitor should define __init__");
-    assert!(has_defines_edge(&cg, "CallGraphVisitor", "visit_FunctionDef"),
-            "CallGraphVisitor should define visit_FunctionDef");
-    assert!(has_defines_edge(&cg, "Node", "get_name"),
-            "Node should define get_name");
-
-    // Verify some uses edges
-    assert!(has_uses_edge(&cg, "__init__", "process"),
-            "CallGraphVisitor.__init__ should use process");
-}
-
-// ===================================================================
-// Regression: don't crash on files with annotations, comprehensions
+// Regression: don't crash on edge cases
 // ===================================================================
 
 #[test]
 fn test_regression_annotated_assignments() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
         .join("tests")
         .join("old_tests")
         .join("issue2");
     if dir.exists() {
         let files = collect_py_files(&dir);
-        // Should not panic
         let _ = CallGraph::new(&files, None);
     }
 }
@@ -314,14 +274,11 @@ fn test_regression_annotated_assignments() {
 #[test]
 fn test_regression_comprehensions() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
         .join("tests")
         .join("old_tests")
         .join("issue3");
     if dir.exists() {
         let files = collect_py_files(&dir);
-        // Should not panic
         let _ = CallGraph::new(&files, None);
     }
 }
@@ -329,14 +286,11 @@ fn test_regression_comprehensions() {
 #[test]
 fn test_regression_external_deps() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
         .join("tests")
         .join("old_tests")
         .join("issue5");
     if dir.exists() {
         let files = collect_py_files(&dir);
-        // Should not panic even though numpy/pandas/plotly are not available
         let _ = CallGraph::new(&files, None);
     }
 }
@@ -347,8 +301,6 @@ fn test_regression_external_deps() {
 
 fn make_features_graph() -> CallGraph {
     let features_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
         .join("tests")
         .join("test_code")
         .join("features.py");
@@ -371,13 +323,11 @@ fn test_features_classes_found() {
 #[test]
 fn test_features_decorators() {
     let cg = make_features_graph();
-    // Decorated should define static_method, class_method, my_prop, regular
     assert!(has_defines_edge(&cg, "Decorated", "static_method"));
     assert!(has_defines_edge(&cg, "Decorated", "class_method"));
     assert!(has_defines_edge(&cg, "Decorated", "my_prop"));
     assert!(has_defines_edge(&cg, "Decorated", "regular"));
 
-    // Check flavors
     let sm: Vec<_> = find_nodes_by_name(&cg, "static_method").into_iter()
         .filter(|&id| cg.nodes_arena[id].flavor == pyan_rs::node::Flavor::StaticMethod)
         .collect();
@@ -392,10 +342,8 @@ fn test_features_decorators() {
 #[test]
 fn test_features_inheritance() {
     let cg = make_features_graph();
-    // Derived inherits from Base, should have uses edge to Base
     assert!(has_uses_edge(&cg, "Derived", "Base"),
             "Derived should use Base (inheritance)");
-    // Base.bar calls self.foo()
     assert!(has_uses_edge(&cg, "bar", "foo"),
             "bar should use foo");
 }
@@ -403,7 +351,6 @@ fn test_features_inheritance() {
 #[test]
 fn test_features_multiple_inheritance() {
     let cg = make_features_graph();
-    // Combined inherits from MixinA and MixinB
     assert!(has_uses_edge(&cg, "Combined", "MixinA"),
             "Combined should use MixinA");
     assert!(has_uses_edge(&cg, "Combined", "MixinB"),
@@ -411,24 +358,21 @@ fn test_features_multiple_inheritance() {
 }
 
 // ===================================================================
-// Performance: analyze pyan source should be fast
+// Performance
 // ===================================================================
 
 #[test]
-fn test_performance_pyan_source() {
-    let pyan_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("pyan");
-    let files = collect_py_files(&pyan_dir);
+fn test_performance() {
+    let dir = test_code_dir();
+    let files = collect_py_files(&dir);
+    let root = dir.parent().unwrap().to_string_lossy().to_string();
 
     let start = std::time::Instant::now();
-    for _ in 0..10 {
-        let _ = CallGraph::new(&files, Some(&pyan_dir.parent().unwrap().to_string_lossy())).unwrap();
+    for _ in 0..100 {
+        let _ = CallGraph::new(&files, Some(&root)).unwrap();
     }
     let elapsed = start.elapsed();
-    let per_run = elapsed / 10;
-    eprintln!("Average analysis time: {:?} (10 runs)", per_run);
-    // Should complete in under 500ms per run for 10 files
-    assert!(per_run.as_millis() < 500, "Analysis too slow: {:?}", per_run);
+    let per_run = elapsed / 100;
+    eprintln!("Average analysis time: {:?} (100 runs over {} files)", per_run, files.len());
+    assert!(per_run.as_millis() < 200, "Analysis too slow: {:?}", per_run);
 }
