@@ -1,14 +1,14 @@
 [package]
-name = "pyan-rs"
+name = "pycallgraph-rs"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "pyan-rs"
+name = "pycg"
 path = "src/main.rs"
 
 [lib]
-name = "pyan_rs"
+name = "pycallgraph_rs"
 path = "src/lib.rs"
 
 [dependencies]

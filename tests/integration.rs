@@ -5,9 +5,9 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use pyan_rs::analyzer::CallGraph;
-use pyan_rs::visgraph::{VisualGraph, VisualOptions};
-use pyan_rs::writer;
+use pycallgraph_rs::analyzer::CallGraph;
+use pycallgraph_rs::visgraph::{VisualGraph, VisualOptions};
+use pycallgraph_rs::writer;
 
 fn test_code_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -115,7 +115,7 @@ fn has_uses_edge(cg: &CallGraph, from_name: &str, to_name: &str) -> bool {
 fn test_modules_found() {
     let cg = make_call_graph(&test_code_dir());
     let module_names: Vec<_> = cg.nodes_arena.iter()
-        .filter(|n| n.flavor == pyan_rs::node::Flavor::Module)
+        .filter(|n| n.flavor == pycallgraph_rs::node::Flavor::Module)
         .map(|n| n.get_name())
         .collect();
     assert!(module_names.iter().any(|n| n.contains("submodule1")), "submodule1 not found");
@@ -126,7 +126,7 @@ fn test_modules_found() {
 fn test_class_found() {
     let cg = make_call_graph(&test_code_dir());
     let classes: Vec<_> = cg.nodes_arena.iter()
-        .filter(|n| n.flavor == pyan_rs::node::Flavor::Class)
+        .filter(|n| n.flavor == pycallgraph_rs::node::Flavor::Class)
         .map(|n| n.name.clone())
         .collect();
     assert!(classes.contains(&"A".to_string()), "Class A not found, got: {:?}", classes);
@@ -136,7 +136,7 @@ fn test_class_found() {
 fn test_function_found() {
     let cg = make_call_graph(&test_code_dir());
     let functions: Vec<_> = cg.nodes_arena.iter()
-        .filter(|n| matches!(n.flavor, pyan_rs::node::Flavor::Function | pyan_rs::node::Flavor::Method))
+        .filter(|n| matches!(n.flavor, pycallgraph_rs::node::Flavor::Function | pycallgraph_rs::node::Flavor::Method))
         .map(|n| n.name.clone())
         .collect();
     assert!(functions.contains(&"test_func1".to_string()), "test_func1 not found, got: {:?}", functions);
@@ -312,7 +312,7 @@ fn make_features_graph() -> CallGraph {
 fn test_features_classes_found() {
     let cg = make_features_graph();
     let class_names: HashSet<_> = cg.nodes_arena.iter()
-        .filter(|n| n.flavor == pyan_rs::node::Flavor::Class)
+        .filter(|n| n.flavor == pycallgraph_rs::node::Flavor::Class)
         .map(|n| n.name.as_str())
         .collect();
     for expected in ["Decorated", "Base", "Derived", "MixinA", "MixinB", "Combined"] {
@@ -329,12 +329,12 @@ fn test_features_decorators() {
     assert!(has_defines_edge(&cg, "Decorated", "regular"));
 
     let sm: Vec<_> = find_nodes_by_name(&cg, "static_method").into_iter()
-        .filter(|&id| cg.nodes_arena[id].flavor == pyan_rs::node::Flavor::StaticMethod)
+        .filter(|&id| cg.nodes_arena[id].flavor == pycallgraph_rs::node::Flavor::StaticMethod)
         .collect();
     assert!(!sm.is_empty(), "static_method should have StaticMethod flavor");
 
     let cm: Vec<_> = find_nodes_by_name(&cg, "class_method").into_iter()
-        .filter(|&id| cg.nodes_arena[id].flavor == pyan_rs::node::Flavor::ClassMethod)
+        .filter(|&id| cg.nodes_arena[id].flavor == pycallgraph_rs::node::Flavor::ClassMethod)
         .collect();
     assert!(!cm.is_empty(), "class_method should have ClassMethod flavor");
 }

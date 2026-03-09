@@ -1,4 +1,4 @@
-# pyan-rs
+# pycallgraph-rs
 
 A Rust reimplementation of [pyan3](https://github.com/Technologicat/pyan) — a static call graph generator for Python programs.
 
@@ -8,22 +8,22 @@ Parses Python source files and produces a directed graph of defines/uses relatio
 
 ```bash
 # Analyze Python files, output DOT format (default)
-pyan-rs src/**/*.py
+pycg src/**/*.py
 
 # Output as plain text dependency list
-pyan-rs mypackage/ --format text
+pycg mypackage/ --format text
 
 # Show both defines and uses edges, colored by file
-pyan-rs mypackage/ -d -u --colored --grouped
+pycg mypackage/ -d -u --colored --grouped
 
 # Pipe DOT to graphviz for SVG
-pyan-rs mypackage/ | dot -Tsvg -o callgraph.svg
+pycg mypackage/ | dot -Tsvg -o callgraph.svg
 ```
 
 ### Options
 
 ```
-pyan-rs [OPTIONS] <FILES>...
+pycg [OPTIONS] <FILES>...
 
 Arguments:
   <FILES>...  Python source files or directories to analyze
@@ -88,13 +88,13 @@ cargo test
 
 ## Performance
 
-~7x faster than the Python pyan3 on real-world codebases. On the pyan3 source tree (10 files, ~4200 LOC):
+~7x faster than Python pyan3 on real-world codebases. On the pyan3 source tree (10 files, ~4200 LOC):
 
 | | Median |
 |---|---|
 | Python pyan3 | 220ms |
-| pyan-rs | 31ms (wall clock incl. process startup) |
-| pyan-rs (library, no startup) | ~10ms |
+| pycg | 31ms (wall clock incl. process startup) |
+| pycallgraph-rs (library, no startup) | ~10ms |
 
 ## Differences from pyan3
 

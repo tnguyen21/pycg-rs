@@ -635,7 +635,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pyan-rs"
+name = "pycallgraph-rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",

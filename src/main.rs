@@ -4,12 +4,12 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use walkdir::WalkDir;
 
-use pyan_rs::analyzer::CallGraph;
-use pyan_rs::visgraph::{VisualGraph, VisualOptions};
-use pyan_rs::writer;
+use pycallgraph_rs::analyzer::CallGraph;
+use pycallgraph_rs::visgraph::{VisualGraph, VisualOptions};
+use pycallgraph_rs::writer;
 
 #[derive(Parser)]
-#[command(name = "pyan-rs", about = "Generate call graphs for Python programs")]
+#[command(name = "pycg", about = "Generate call graphs for Python programs")]
 struct Cli {
     /// Python source files or directories to analyze
     #[arg(required = true)]
