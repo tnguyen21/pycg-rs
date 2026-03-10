@@ -1,0 +1,88 @@
+---
+source: tests/cli.rs
+expression: "serde_json::to_string_pretty(&json).expect(\"snapshot json should serialize\")"
+---
+{
+  "edges": [
+    {
+      "kind": "defines",
+      "source": "tests.test_code.accuracy_factory",
+      "target": "tests.test_code.accuracy_factory.Product"
+    },
+    {
+      "kind": "defines",
+      "source": "tests.test_code.accuracy_factory",
+      "target": "tests.test_code.accuracy_factory.consumer"
+    },
+    {
+      "kind": "defines",
+      "source": "tests.test_code.accuracy_factory",
+      "target": "tests.test_code.accuracy_factory.factory"
+    },
+    {
+      "kind": "defines",
+      "source": "tests.test_code.accuracy_factory.Product",
+      "target": "tests.test_code.accuracy_factory.Product.make"
+    },
+    {
+      "kind": "uses",
+      "source": "tests.test_code.accuracy_factory.consumer",
+      "target": "tests.test_code.accuracy_factory.Product"
+    },
+    {
+      "kind": "uses",
+      "source": "tests.test_code.accuracy_factory.consumer",
+      "target": "tests.test_code.accuracy_factory.Product.make"
+    },
+    {
+      "kind": "uses",
+      "source": "tests.test_code.accuracy_factory.consumer",
+      "target": "tests.test_code.accuracy_factory.factory"
+    },
+    {
+      "kind": "uses",
+      "source": "tests.test_code.accuracy_factory.factory",
+      "target": "tests.test_code.accuracy_factory.Product"
+    }
+  ],
+  "nodes": [
+    {
+      "file": "accuracy_factory.py",
+      "flavor": "module",
+      "line": 1,
+      "name": "tests.test_code.accuracy_factory"
+    },
+    {
+      "file": "accuracy_factory.py",
+      "flavor": "class",
+      "line": 15,
+      "name": "tests.test_code.accuracy_factory.Product"
+    },
+    {
+      "file": "accuracy_factory.py",
+      "flavor": "function",
+      "line": 25,
+      "name": "tests.test_code.accuracy_factory.consumer"
+    },
+    {
+      "file": "accuracy_factory.py",
+      "flavor": "function",
+      "line": 20,
+      "name": "tests.test_code.accuracy_factory.factory"
+    },
+    {
+      "file": "accuracy_factory.py",
+      "flavor": "method",
+      "line": 16,
+      "name": "tests.test_code.accuracy_factory.Product.make"
+    }
+  ],
+  "stats": {
+    "classes": 1,
+    "files_analyzed": 1,
+    "functions": 3,
+    "modules": 1,
+    "total_edges": 8,
+    "total_nodes": 5
+  }
+}

@@ -1,0 +1,53 @@
+---
+source: tests/cli.rs
+expression: "serde_json::to_string_pretty(&json).expect(\"snapshot json should serialize\")"
+---
+{
+  "edges": [
+    {
+      "kind": "uses",
+      "source": "test_code.import_coverage.user",
+      "target": "test_code.import_coverage.deep.inner"
+    },
+    {
+      "kind": "uses",
+      "source": "test_code.import_coverage.user",
+      "target": "test_code.import_coverage.sibling"
+    }
+  ],
+  "nodes": [
+    {
+      "file": "__init__.py",
+      "flavor": "module",
+      "name": "test_code.import_coverage"
+    },
+    {
+      "file": "__init__.py",
+      "flavor": "module",
+      "name": "test_code.import_coverage.deep"
+    },
+    {
+      "file": "inner.py",
+      "flavor": "module",
+      "name": "test_code.import_coverage.deep.inner"
+    },
+    {
+      "file": "sibling.py",
+      "flavor": "module",
+      "name": "test_code.import_coverage.sibling"
+    },
+    {
+      "file": "user.py",
+      "flavor": "module",
+      "name": "test_code.import_coverage.user"
+    }
+  ],
+  "stats": {
+    "classes": 0,
+    "files_analyzed": 5,
+    "functions": 0,
+    "modules": 5,
+    "total_edges": 2,
+    "total_nodes": 5
+  }
+}
