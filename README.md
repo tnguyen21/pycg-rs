@@ -153,9 +153,7 @@ To reproduce: `./benchmarks/setup.sh && python3 benchmarks/bench.py` (requires t
 
 ## Differences from pyan3
 
-This is a standalone CLI/library that already covers a substantial subset of Python call-graph analysis, but it is still narrower than pyan3 in scope. Not yet implemented:
-
-- PyO3 Python bindings
+This is a standalone CLI/library that already covers a substantial subset of Python call-graph analysis, but it is still narrower than pyan3 in scope.
 
 ## License
 
