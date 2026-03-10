@@ -9,8 +9,15 @@
 //! 4. **Postprocess** – expand unknowns, contract non-existents, cull
 //!    inherited edges, collapse inner scopes, resolve imports.
 
+mod mro;
+mod postprocess;
+mod util;
+
+use mro::resolve_mro;
+pub use util::get_module_name;
+use util::{collect_target_names_from_expr, get_ast_node_name, literal_key_from_expr};
+
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
 use anyhow::{Context, Result};
 use log::{debug, info};
@@ -32,7 +39,7 @@ use crate::scope::ValueSet;
 /// to.  An empty `ValueSet` means the name is declared but unresolved.
 /// Bindings are unioned on rebind (no last-writer-wins).
 #[derive(Debug, Clone)]
-struct ScopeInfo {
+pub(super) struct ScopeInfo {
     defs: HashMap<String, ValueSet>,
     /// Shallow container facts for locally-bound names/attributes.
     ///
@@ -219,39 +226,39 @@ pub struct CallGraph {
     pub defined: HashSet<NodeId>,
 
     // Scope tracking (persistent across files/passes) -------------------
-    scopes: HashMap<String, ScopeInfo>,
+    pub(super) scopes: HashMap<String, ScopeInfo>,
 
     // Class information -------------------------------------------------
     /// Pass 1: class NodeId -> list of base-class AST info (stored as
     /// (namespace, name) pairs extracted from AST nodes).
-    class_base_ast_info: HashMap<NodeId, Vec<BaseClassRef>>,
+    pub(super) class_base_ast_info: HashMap<NodeId, Vec<BaseClassRef>>,
     /// Pass 2: class NodeId -> resolved base NodeIds.
-    class_base_nodes: HashMap<NodeId, Vec<NodeId>>,
+    pub(super) class_base_nodes: HashMap<NodeId, Vec<NodeId>>,
     /// MRO for each class.
-    mro: HashMap<NodeId, Vec<NodeId>>,
+    pub(super) mro: HashMap<NodeId, Vec<NodeId>>,
 
     /// Collected return values per function node, used for return-value propagation.
     /// Maps function/method NodeId -> set of NodeIds that the function may return.
     /// Populated during `visit_stmt(Return)` and consumed in `visit_call`.
-    function_returns: HashMap<NodeId, HashSet<NodeId>>,
+    pub(super) function_returns: HashMap<NodeId, HashSet<NodeId>>,
 
     // File mapping ------------------------------------------------------
-    module_to_filename: HashMap<String, String>,
-    filenames: Vec<String>,
-    root: Option<String>,
+    pub(super) module_to_filename: HashMap<String, String>,
+    pub(super) filenames: Vec<String>,
+    pub(super) root: Option<String>,
 
     // Transient state (reset per file) ----------------------------------
-    module_name: String,
-    filename: String,
-    name_stack: Vec<String>,
-    scope_stack: Vec<String>, // keys into self.scopes
-    class_stack: Vec<NodeId>,
-    context_stack: Vec<String>,
+    pub(super) module_name: String,
+    pub(super) filename: String,
+    pub(super) name_stack: Vec<String>,
+    pub(super) scope_stack: Vec<String>, // keys into self.scopes
+    pub(super) class_stack: Vec<NodeId>,
+    pub(super) context_stack: Vec<String>,
 }
 
 /// Describes how a base class was referenced in the source.
 #[derive(Debug, Clone)]
-enum BaseClassRef {
+pub(super) enum BaseClassRef {
     Name(String),
     Attribute(Vec<String>),
 }
@@ -626,7 +633,7 @@ impl CallGraph {
     // =====================================================================
 
     /// Get or create the unique node for (namespace, name).
-    fn get_node(
+    pub(super) fn get_node(
         &mut self,
         namespace: Option<&str>,
         name: &str,
@@ -690,7 +697,7 @@ impl CallGraph {
     }
 
     /// Get the parent node of the given node (by splitting its namespace).
-    fn get_parent_node(&mut self, node_id: NodeId) -> NodeId {
+    pub(super) fn get_parent_node(&mut self, node_id: NodeId) -> NodeId {
         let node = &self.nodes_arena[node_id];
         let (ns, name) = if let Some(ref namespace) = node.namespace {
             if namespace.contains('.') {
@@ -717,7 +724,7 @@ impl CallGraph {
     // Edge management
     // =====================================================================
 
-    fn add_defines_edge(&mut self, from_id: NodeId, to_id: Option<NodeId>) -> bool {
+    pub(super) fn add_defines_edge(&mut self, from_id: NodeId, to_id: Option<NodeId>) -> bool {
         self.defined.insert(from_id);
         let entry = self.defines_edges.entry(from_id).or_default();
         if let Some(to) = to_id {
@@ -728,7 +735,7 @@ impl CallGraph {
         }
     }
 
-    fn add_uses_edge(&mut self, from_id: NodeId, to_id: NodeId) -> bool {
+    pub(super) fn add_uses_edge(&mut self, from_id: NodeId, to_id: NodeId) -> bool {
         let entry = self.uses_edges.entry(from_id).or_default();
         if entry.insert(to_id) {
             // Remove matching wildcard
@@ -743,7 +750,7 @@ impl CallGraph {
         }
     }
 
-    fn remove_uses_edge(&mut self, from_id: NodeId, to_id: NodeId) {
+    pub(super) fn remove_uses_edge(&mut self, from_id: NodeId, to_id: NodeId) {
         if let Some(edges) = self.uses_edges.get_mut(&from_id) {
             edges.remove(&to_id);
         }
@@ -1052,7 +1059,7 @@ impl CallGraph {
     }
 
     /// Look up all possible values of a name in a specific (named) scope.
-    fn lookup_values_in_scope(&self, ns: &str, name: &str) -> ValueSet {
+    pub(super) fn lookup_values_in_scope(&self, ns: &str, name: &str) -> ValueSet {
         if let Some(scope) = self.scopes.get(ns) {
             if let Some(vs) = scope.defs.get(name) {
                 return vs.clone();
@@ -3001,707 +3008,4 @@ impl CallGraph {
         Some(current)
     }
 
-    // =====================================================================
-    // Postprocessing
-    // =====================================================================
-
-    fn postprocess(&mut self) {
-        self.expand_unknowns();
-        self.resolve_imports();
-        self.contract_nonexistents();
-        self.cull_inherited();
-        self.collapse_inner();
-    }
-
-    /// For each unknown node `*.name`, replace all its incoming edges
-    /// with edges to `X.name` for all possible Xs.
-    ///
-    /// Precision heuristic (INV-2): if a caller already has a *concrete*
-    /// uses edge to any node named `name`, skip wildcard expansion for that
-    /// `(caller, name)` pair.  This prevents broad false-positive fanout when
-    /// the abstract-value machinery has already produced a better resolution.
-    fn expand_unknowns(&mut self) {
-        // Build index of (from_id, short_name) pairs that already have a
-        // concrete (namespaced) uses edge.  Wildcards whose (from, name) are
-        // covered by a concrete edge will be suppressed.
-        let mut concrete_uses_pairs: HashSet<(NodeId, String)> = HashSet::new();
-        for (&from, targets) in &self.uses_edges {
-            for &to in targets {
-                if self.nodes_arena[to].namespace.is_some() {
-                    concrete_uses_pairs.insert((from, self.nodes_arena[to].name.clone()));
-                }
-            }
-        }
-
-        // Collect new defines edges (unchanged — no precision scoping for defines).
-        let mut new_defines: Vec<(NodeId, NodeId)> = Vec::new();
-        for (&from, targets) in &self.defines_edges {
-            for &to in targets {
-                if self.nodes_arena[to].namespace.is_none() {
-                    let name = self.nodes_arena[to].name.clone();
-                    if let Some(ids) = self.nodes_by_name.get(&name) {
-                        for &candidate in ids {
-                            if self.nodes_arena[candidate].namespace.is_some() {
-                                new_defines.push((from, candidate));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        for (from, to) in new_defines {
-            self.add_defines_edge(from, Some(to));
-        }
-
-        // Collect new uses edges — skip when a concrete resolution already exists
-        // for the same (from, name) pair (precision heuristic).
-        let mut new_uses: Vec<(NodeId, NodeId)> = Vec::new();
-        for (&from, targets) in &self.uses_edges {
-            for &to in targets {
-                if self.nodes_arena[to].namespace.is_none() {
-                    let name = self.nodes_arena[to].name.clone();
-                    // INV-3: Do not fan out private names globally.
-                    // A private name that was filtered by star-import should
-                    // remain unresolved rather than being reattached to an
-                    // unrelated module's private function with the same short
-                    // name.  Within-module private calls are already handled
-                    // by scope analysis and will appear in concrete_uses_pairs.
-                    if name.starts_with('_') {
-                        continue;
-                    }
-                    // Suppress global fanout when the caller already has a
-                    // concrete resolution for this short name.
-                    if concrete_uses_pairs.contains(&(from, name.clone())) {
-                        continue;
-                    }
-                    if let Some(ids) = self.nodes_by_name.get(&name) {
-                        for &candidate in ids {
-                            if let Some(ref ns) = self.nodes_arena[candidate].namespace.clone() {
-                                // INV-1: If the candidate's module defines __all__ and
-                                // this name is not listed, skip the expansion.  Such a
-                                // name is intentionally unexported; an unresolved call
-                                // to it must not be attributed to the module's private
-                                // implementation.
-                                if !ns.is_empty() {
-                                    if let Some(scope) = self.scopes.get(ns) {
-                                        if let Some(ref exports) = scope.all_exports.clone() {
-                                            if !exports.contains(&name) {
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                }
-                                new_uses.push((from, candidate));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        for (from, to) in new_uses {
-            self.add_uses_edge(from, to);
-        }
-
-        // Mark all unknown nodes as not defined
-        for ids in self.nodes_by_name.values() {
-            for &id in ids {
-                if self.nodes_arena[id].namespace.is_none() {
-                    self.defined.remove(&id);
-                }
-            }
-        }
-    }
-
-    /// Resolve import edges: follow import chains to their definitions.
-    ///
-    /// Two strategies are tried in order for each remaining `ImportedItem`:
-    ///
-    /// 1. **Scope lookup** — the ImportedItem's namespace IS the source module
-    ///    name.  If `scopes[namespace][name]` is non-empty we can remap
-    ///    directly, without needing any outgoing edge on the placeholder node.
-    ///    This handles re-export chains that were not yet resolved when
-    ///    `visit_import_from` ran.
-    ///
-    /// 2. **Uses-edge walk** — legacy path kept for modules whose scopes are
-    ///    not available (external packages, etc.).
-    fn resolve_imports(&mut self) {
-        // Find all imported item nodes
-        let import_nodes: Vec<NodeId> = self
-            .nodes_by_name
-            .values()
-            .flat_map(|ids| ids.iter())
-            .copied()
-            .filter(|&id| self.nodes_arena[id].flavor == Flavor::ImportedItem)
-            .collect();
-
-        let mut import_mapping: HashMap<NodeId, NodeId> = HashMap::new();
-        let mut to_resolve: Vec<NodeId> = import_nodes;
-
-        while let Some(from_id) = to_resolve.pop() {
-            if import_mapping.contains_key(&from_id) {
-                continue;
-            }
-
-            let mod_name = self.nodes_arena[from_id]
-                .namespace
-                .clone()
-                .unwrap_or_default();
-            let item_name = self.nodes_arena[from_id].name.clone();
-
-            // Strategy 1: scope lookup in the source module.
-            let scope_vals: Vec<NodeId> =
-                self.lookup_values_in_scope(&mod_name, &item_name).iter().collect();
-            if !scope_vals.is_empty() {
-                // Prefer the first concrete (non-ImportedItem) candidate so
-                // that we chain through rather than stop at another placeholder.
-                let best = scope_vals
-                    .iter()
-                    .find(|&&id| self.nodes_arena[id].flavor != Flavor::ImportedItem)
-                    .or_else(|| scope_vals.first())
-                    .copied();
-                if let Some(target) = best {
-                    import_mapping.insert(from_id, target);
-                    // If the target is itself still an ImportedItem, chase it.
-                    if self.nodes_arena[target].flavor == Flavor::ImportedItem
-                        && target != from_id
-                    {
-                        to_resolve.push(target);
-                    }
-                    continue;
-                }
-            }
-
-            // Strategy 2: uses-edge walk (legacy path for external modules).
-            let to_id = if let Some(targets) = self.uses_edges.get(&from_id) {
-                if targets.len() == 1 {
-                    *targets.iter().next().expect("len == 1 checked above")
-                } else {
-                    continue;
-                }
-            } else {
-                continue;
-            };
-
-            // Resolve namespace
-            let module_id = if self.nodes_arena[to_id].namespace.as_deref() == Some("") {
-                to_id
-            } else {
-                let ns = self.nodes_arena[to_id]
-                    .namespace
-                    .clone()
-                    .unwrap_or_default();
-                self.get_node(Some(""), &ns, Flavor::Namespace)
-            };
-
-            if let Some(module_uses) = self.uses_edges.get(&module_id).cloned() {
-                let from_name = self.nodes_arena[from_id].name.clone();
-                for candidate in &module_uses {
-                    if self.nodes_arena[*candidate].name == from_name {
-                        import_mapping.insert(from_id, *candidate);
-                        if self.nodes_arena[*candidate].flavor == Flavor::ImportedItem
-                            && *candidate != from_id
-                        {
-                            to_resolve.push(*candidate);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Apply mapping to edges
-        if !import_mapping.is_empty() {
-            let remap = |id: NodeId| -> NodeId { *import_mapping.get(&id).unwrap_or(&id) };
-
-            // Remap uses_edges
-            let old_uses: Vec<(NodeId, HashSet<NodeId>)> =
-                self.uses_edges.drain().collect();
-            for (from, targets) in old_uses {
-                if targets.is_empty() {
-                    continue;
-                }
-                let new_from = remap(from);
-                let entry = self.uses_edges.entry(new_from).or_default();
-                for to in targets {
-                    entry.insert(remap(to));
-                }
-            }
-
-            // Remap defines_edges
-            let old_defines: Vec<(NodeId, HashSet<NodeId>)> =
-                self.defines_edges.drain().collect();
-            for (from, targets) in old_defines {
-                if targets.is_empty() {
-                    continue;
-                }
-                let new_from = remap(from);
-                let entry = self.defines_edges.entry(new_from).or_default();
-                for to in targets {
-                    entry.insert(remap(to));
-                }
-            }
-
-            // Remap nodes_by_name
-            for ids in self.nodes_by_name.values_mut() {
-                for id in ids.iter_mut() {
-                    if let Some(&mapped) = import_mapping.get(id) {
-                        *id = mapped;
-                    }
-                }
-            }
-        }
-    }
-
-    /// For all use edges to non-existent nodes X.name, replace with *.name.
-    fn contract_nonexistents(&mut self) {
-        // First pass: collect edges that need changes (from, to, wildcard_name)
-        let mut to_contract: Vec<(NodeId, NodeId, String)> = Vec::new();
-
-        for (&from, targets) in &self.uses_edges {
-            for &to in targets {
-                if self.nodes_arena[to].namespace.is_some() && !self.defined.contains(&to) {
-                    let name = self.nodes_arena[to].name.clone();
-                    to_contract.push((from, to, name));
-                }
-            }
-        }
-
-        // Second pass: create wildcard nodes and update edges
-        for (from, to, name) in to_contract {
-            let wild_id = self.get_node(None, &name, Flavor::Unknown);
-            self.defined.remove(&wild_id);
-            self.add_uses_edge(from, wild_id);
-            self.remove_uses_edge(from, to);
-        }
-    }
-
-    /// Remove inherited edges: if W->X.name and W->Y.name where Y inherits
-    /// from X, remove the edge to X.name.
-    fn cull_inherited(&mut self) {
-        let mut removed: Vec<(NodeId, NodeId)> = Vec::new();
-
-        let uses_snapshot: Vec<(NodeId, HashSet<NodeId>)> = self
-            .uses_edges
-            .iter()
-            .map(|(&k, v)| (k, v.clone()))
-            .collect();
-
-        for (from, targets) in &uses_snapshot {
-            for &to in targets {
-                let mut inherited = false;
-                for &other in targets {
-                    if other == to {
-                        continue;
-                    }
-                    let to_name = &self.nodes_arena[to].name;
-                    let other_name = &self.nodes_arena[other].name;
-                    let to_ns = &self.nodes_arena[to].namespace;
-                    let other_ns = &self.nodes_arena[other].namespace;
-
-                    if to_name == other_name
-                        && to_ns.is_some()
-                        && other_ns.is_some()
-                        && to_ns != other_ns
-                    {
-                        let parent_to = self.get_parent_node(to);
-                        let parent_other = self.get_parent_node(other);
-                        if let Some(parent_to_uses) = self.uses_edges.get(&parent_to)
-                            && parent_to_uses.contains(&parent_other) {
-                                inherited = true;
-                                break;
-                            }
-                    }
-                }
-                if inherited {
-                    removed.push((*from, to));
-                }
-            }
-        }
-
-        for (from, to) in removed {
-            self.remove_uses_edge(from, to);
-        }
-    }
-
-    /// Collapse lambda and comprehension nodes into their parents.
-    fn collapse_inner(&mut self) {
-        let inner_labels = ["lambda", "listcomp", "setcomp", "dictcomp", "genexpr"];
-
-        for label in &inner_labels {
-            if let Some(ids) = self.nodes_by_name.get(*label).cloned() {
-                for id in ids {
-                    let parent_id = self.get_parent_node(id);
-
-                    // Move uses edges from inner to parent
-                    if let Some(inner_uses) = self.uses_edges.get(&id).cloned() {
-                        for target in inner_uses {
-                            self.add_uses_edge(parent_id, target);
-                        }
-                    }
-
-                    // Mark as not defined
-                    self.defined.remove(&id);
-                }
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Module-level dependency graph
-    // ------------------------------------------------------------------
-
-    /// Derive a module-level dependency graph by collapsing all cross-module
-    /// uses edges.
-    ///
-    /// For each uses edge `src → tgt`, both nodes are mapped back to their
-    /// owning module (via filename for analyzed code, via node name for
-    /// external `Flavor::Module` targets).  If they differ, a module-level
-    /// edge is emitted.  Deduplication at the module level keeps the graph
-    /// clean.
-    ///
-    /// Returns `(nodes_arena, uses_edges, defined)` suitable for passing
-    /// directly to `VisualGraph::from_call_graph`.
-    pub fn derive_module_graph(
-        &self,
-    ) -> (
-        Vec<Node>,
-        HashMap<NodeId, HashSet<NodeId>>,
-        HashSet<NodeId>,
-    ) {
-        // Reverse mapping: filename → module name (for analyzed files).
-        let filename_to_module: HashMap<&str, &str> = self
-            .module_to_filename
-            .iter()
-            .map(|(m, f)| (f.as_str(), m.as_str()))
-            .collect();
-
-        // Collect module nodes and assign new compact IDs.
-        let mut module_ids: HashMap<String, NodeId> = HashMap::new();
-        let mut new_nodes: Vec<Node> = Vec::new();
-
-        let mut ensure_module = |name: &str, nodes: &mut Vec<Node>| -> NodeId {
-            if let Some(&id) = module_ids.get(name) {
-                return id;
-            }
-            let id = nodes.len();
-            nodes.push(Node::new(Some(""), name, Flavor::Module));
-            module_ids.insert(name.to_string(), id);
-            id
-        };
-
-        // Seed with all analyzed modules.
-        for (mod_name, filename) in &self.module_to_filename {
-            let id = ensure_module(mod_name, &mut new_nodes);
-            new_nodes[id].filename = Some(filename.clone());
-        }
-
-        // Collapse uses_edges to module granularity.
-        let mut module_edges: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
-
-        for (&src, targets) in &self.uses_edges {
-            let src_node = &self.nodes_arena[src];
-            let src_mod = match src_node.filename.as_deref() {
-                Some(f) => filename_to_module.get(f).copied(),
-                None => None,
-            };
-            let Some(src_mod) = src_mod else { continue };
-
-            for &tgt in targets {
-                let tgt_node = &self.nodes_arena[tgt];
-
-                // Map target to its owning module: Module-flavored nodes
-                // use their name (handles external/stdlib); all others
-                // use their filename.
-                let tgt_mod: Option<String> = if tgt_node.flavor == Flavor::Module {
-                    Some(tgt_node.get_name())
-                } else {
-                    tgt_node
-                        .filename
-                        .as_deref()
-                        .and_then(|f| filename_to_module.get(f))
-                        .map(|s| s.to_string())
-                };
-
-                let Some(tgt_mod) = tgt_mod else { continue };
-                if tgt_mod == src_mod {
-                    continue;
-                }
-
-                let src_mid = ensure_module(src_mod, &mut new_nodes);
-                let tgt_mid = ensure_module(&tgt_mod, &mut new_nodes);
-                module_edges.entry(src_mid).or_default().insert(tgt_mid);
-            }
-        }
-
-        let defined: HashSet<NodeId> = (0..new_nodes.len()).collect();
-        (new_nodes, module_edges, defined)
-    }
-}
-
-// =========================================================================
-// Free functions
-// =========================================================================
-
-/// Extract a human-readable name from an expression (for debugging / attr
-/// chain resolution).
-fn get_ast_node_name(expr: &Expr) -> String {
-    match expr {
-        Expr::Name(n) => n.id.to_string(),
-        Expr::Attribute(a) => {
-            format!("{}.{}", get_ast_node_name(&a.value), a.attr.id)
-        }
-        _ => String::new(),
-    }
-}
-
-/// Collect all Name identifiers from an assignment target expression.
-fn collect_target_names_from_expr(target: &Expr, names: &mut HashSet<String>) {
-    match target {
-        Expr::Name(n) => {
-            names.insert(n.id.to_string());
-        }
-        Expr::Tuple(t) => {
-            for elt in &t.elts {
-                collect_target_names_from_expr(elt, names);
-            }
-        }
-        Expr::List(l) => {
-            for elt in &l.elts {
-                collect_target_names_from_expr(elt, names);
-            }
-        }
-        Expr::Starred(s) => {
-            collect_target_names_from_expr(&s.value, names);
-        }
-        _ => {}
-    }
-}
-
-/// Extract a small literal key we can use for shallow subscript resolution.
-fn literal_key_from_expr(expr: &Expr) -> Option<LiteralKey> {
-    match expr {
-        Expr::StringLiteral(s) => Some(LiteralKey::String(s.value.to_str().to_string())),
-        Expr::NumberLiteral(n) => match &n.value {
-            Number::Int(i) => i.as_i64().map(LiteralKey::Int),
-            Number::Float(_) | Number::Complex { .. } => None,
-        },
-        Expr::UnaryOp(u) if matches!(u.op, UnaryOp::USub) => {
-            if let Expr::NumberLiteral(n) = u.operand.as_ref() {
-                if let Number::Int(i) = &n.value {
-                    return i.as_i64().and_then(|value| value.checked_neg()).map(LiteralKey::Int);
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-/// Convert a Python source filename to a dotted module name.
-///
-/// If `root` is `None`, walks up directories checking for `__init__.py` to
-/// find the package root.
-pub fn get_module_name(filename: &str, root: Option<&str>) -> String {
-    let path = Path::new(filename);
-
-    // Determine the module path (without .py extension)
-    let module_path_buf;
-    let module_path: &Path = if path.file_name().is_some_and(|f| f == "__init__.py") {
-        path.parent().unwrap_or(path)
-    } else {
-        module_path_buf = path.with_extension("");
-        &module_path_buf
-    };
-
-    if let Some(root_dir) = root {
-        // Root is known -- just strip it and join with dots
-        let root_path = Path::new(root_dir);
-        if let Ok(relative) = module_path.strip_prefix(root_path) {
-            return relative
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().to_string())
-                .collect::<Vec<_>>()
-                .join(".");
-        }
-    }
-
-    // Walk up directories checking for __init__.py
-    let mut directories: Vec<(std::path::PathBuf, bool)> =
-        vec![(module_path.to_path_buf(), true)];
-
-    let mut current = module_path.parent();
-    while let Some(dir) = current {
-        if dir == Path::new("") || dir == Path::new("/") {
-            break;
-        }
-        let has_init = dir.join("__init__.py").exists();
-        directories.insert(0, (dir.to_path_buf(), has_init));
-        if !has_init {
-            break;
-        }
-        current = dir.parent();
-    }
-
-    // Keep only from the first directory that is a package root
-    while directories.len() > 1 && !directories[0].1 {
-        directories.remove(0);
-    }
-
-    directories
-        .iter()
-        .map(|(p, _)| {
-            p.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string()
-        })
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
-/// Compute the method resolution order (MRO) using C3 linearization.
-fn resolve_mro(class_base_nodes: &HashMap<NodeId, Vec<NodeId>>) -> HashMap<NodeId, Vec<NodeId>> {
-    fn head(lst: &[NodeId]) -> Option<NodeId> {
-        lst.first().copied()
-    }
-
-    fn tail(lst: &[NodeId]) -> Vec<NodeId> {
-        if lst.len() > 1 {
-            lst[1..].to_vec()
-        } else {
-            Vec::new()
-        }
-    }
-
-    fn c3_find_good_head(heads: &[NodeId], tails: &[Vec<NodeId>]) -> Option<NodeId> {
-        let flat_tails: Vec<NodeId> = tails.iter().flat_map(|t| t.iter().copied()).collect();
-        heads.iter().find(|&&hd| !flat_tails.contains(&hd)).copied() // Cyclic dependency
-    }
-
-    fn c3_merge(lists: &mut [Vec<NodeId>]) -> Vec<NodeId> {
-        let mut out = Vec::new();
-        loop {
-            let heads: Vec<NodeId> = lists
-                .iter()
-                .filter_map(|l| head(l))
-                .collect();
-            if heads.is_empty() {
-                break;
-            }
-            let tails: Vec<Vec<NodeId>> = lists.iter().map(|l| tail(l)).collect();
-            if let Some(hd) = c3_find_good_head(&heads, &tails) {
-                out.push(hd);
-                for list in lists.iter_mut() {
-                    list.retain(|&x| x != hd);
-                }
-            } else {
-                break; // Cyclic — give up
-            }
-        }
-        out
-    }
-
-    let mut mro = HashMap::new();
-    let mut memo: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-
-    fn c3_linearize(
-        node: NodeId,
-        class_base_nodes: &HashMap<NodeId, Vec<NodeId>>,
-        memo: &mut HashMap<NodeId, Vec<NodeId>>,
-        seen: &mut HashSet<NodeId>,
-    ) -> Vec<NodeId> {
-        seen.insert(node);
-        if let Some(cached) = memo.get(&node) {
-            return cached.clone();
-        }
-
-        let result = if !class_base_nodes.contains_key(&node)
-            || class_base_nodes[&node].is_empty()
-        {
-            vec![node]
-        } else {
-            let mut lists = Vec::new();
-            for &base in &class_base_nodes[&node] {
-                if !seen.contains(&base) {
-                    lists.push(c3_linearize(base, class_base_nodes, memo, seen));
-                }
-            }
-            lists.push(class_base_nodes[&node].clone());
-            let mut result = vec![node];
-            result.extend(c3_merge(&mut lists));
-            result
-        };
-
-        memo.insert(node, result.clone());
-        result
-    }
-
-    for &cls in class_base_nodes.keys() {
-        let mut seen = HashSet::new();
-        let lin = c3_linearize(cls, class_base_nodes, &mut memo, &mut seen);
-        mro.insert(cls, lin);
-    }
-
-    mro
-}
-
-// =========================================================================
-// Tests
-// =========================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_get_module_name_simple() {
-        // Without package structure, just the filename stem
-        let name = get_module_name("foo.py", None);
-        assert!(name.ends_with("foo"), "got: {name}");
-    }
-
-    #[test]
-    fn test_get_module_name_init() {
-        // __init__.py should use directory name
-        let name = get_module_name("pkg/__init__.py", Some(""));
-        assert!(name.ends_with("pkg"), "got: {name}");
-    }
-
-    #[test]
-    fn test_resolve_mro_simple() {
-        // A -> B -> C (linear chain)
-        let mut bases = HashMap::new();
-        bases.insert(0, vec![1]); // A inherits from B
-        bases.insert(1, vec![2]); // B inherits from C
-        bases.insert(2, vec![]); // C has no bases
-
-        let mro = resolve_mro(&bases);
-        assert_eq!(mro[&0], vec![0, 1, 2]);
-        assert_eq!(mro[&1], vec![1, 2]);
-        assert_eq!(mro[&2], vec![2]);
-    }
-
-    #[test]
-    fn test_resolve_mro_diamond() {
-        // D inherits from B, C; both B and C inherit from A
-        let mut bases = HashMap::new();
-        bases.insert(3, vec![1, 2]); // D -> B, C
-        bases.insert(1, vec![0]); // B -> A
-        bases.insert(2, vec![0]); // C -> A
-        bases.insert(0, vec![]); // A
-
-        let mro = resolve_mro(&bases);
-        assert_eq!(mro[&3], vec![3, 1, 2, 0]);
-    }
-
-    #[test]
-    fn test_get_ast_node_name() {
-        // Just a basic smoke test — the real tests happen via integration.
-        assert_eq!(get_ast_node_name(&Expr::Name(ExprName {
-            node_index: AtomicNodeIndex::default(),
-            range: ruff_text_size::TextRange::default(),
-            id: "foo".into(),
-            ctx: ExprContext::Load,
-        })), "foo");
-    }
 }
