@@ -274,6 +274,14 @@ pub(super) enum BaseClassRef {
     Attribute(Vec<String>),
 }
 
+struct CachedFile {
+    filename: String,
+    module_name: String,
+    module: ModModule,
+    line_index: LineIndex,
+    scopes: HashMap<String, ScopeInfo>,
+}
+
 impl Deref for AnalysisSession {
     type Target = CallGraph;
 
@@ -340,14 +348,19 @@ impl AnalysisSession {
 
     /// Two-pass analysis followed by a fixpoint loop for return-value propagation.
     fn process(&mut self) -> Result<()> {
+        let cached_files = self.prepare_files()?;
+        for cached_file in &cached_files {
+            self.merge_scopes(&cached_file.scopes);
+        }
+
         for pass_num in 0..2 {
-            for filename in self.filenames.clone() {
+            for cached_file in &cached_files {
                 debug!(
                     "========== pass {}, file '{}' ==========",
                     pass_num + 1,
-                    filename
+                    cached_file.filename
                 );
-                self.process_one(&filename)?;
+                self.process_one(cached_file);
             }
             if pass_num == 0 {
                 self.resolve_base_classes();
@@ -360,13 +373,13 @@ impl AnalysisSession {
         const MAX_PROPAGATION_PASSES: usize = 8;
         for pass_num in 0..MAX_PROPAGATION_PASSES {
             let prev_returns = self.function_returns.clone();
-            for filename in self.filenames.clone() {
+            for cached_file in &cached_files {
                 debug!(
                     "========== propagation pass {}, file '{}' ==========",
                     pass_num + 1,
-                    filename
+                    cached_file.filename
                 );
-                self.process_one(&filename)?;
+                self.process_one(cached_file);
             }
             if self.function_returns == prev_returns {
                 debug!(
@@ -381,80 +394,91 @@ impl AnalysisSession {
         Ok(())
     }
 
+    fn prepare_files(&self) -> Result<Vec<CachedFile>> {
+        let mut cached_files = Vec::with_capacity(self.filenames.len());
+        for filename in &self.filenames {
+            let content =
+                std::fs::read_to_string(filename).with_context(|| format!("reading {filename}"))?;
+            let module_name = get_module_name(filename, self.root.as_deref());
+            let parsed =
+                ruff_python_parser::parse_unchecked(&content, ParseOptions::from(Mode::Module));
+            let module = match parsed.into_syntax() {
+                Mod::Module(module) => module,
+                _ => continue,
+            };
+            let line_index = LineIndex::from_source_text(&content);
+            let scopes = Self::build_scopes(&module, &module_name);
+            cached_files.push(CachedFile {
+                filename: filename.clone(),
+                module_name,
+                module,
+                line_index,
+                scopes,
+            });
+        }
+        Ok(cached_files)
+    }
+
     /// Analyze a single Python source file.
-    fn process_one(&mut self, filename: &str) -> Result<()> {
-        let content =
-            std::fs::read_to_string(filename).with_context(|| format!("reading {filename}"))?;
-        self.filename = filename.to_string();
-        self.module_name = get_module_name(filename, self.root.as_deref());
+    fn process_one(&mut self, cached_file: &CachedFile) {
+        self.filename = cached_file.filename.clone();
+        self.module_name = cached_file.module_name.clone();
 
-        // Pre-pass: gather scope info from AST.
-        self.analyze_scopes(&content);
-
-        // Parse and visit.
-        let parsed =
-            ruff_python_parser::parse_unchecked(&content, ParseOptions::from(Mode::Module));
-        let module = match parsed.syntax() {
-            Mod::Module(m) => m,
-            _ => return Ok(()),
-        };
-
-        let line_index = LineIndex::from_source_text(&content);
-        self.visit_module(module, &line_index);
+        self.visit_module(&cached_file.module, &cached_file.line_index);
 
         self.module_name.clear();
         self.filename.clear();
-        Ok(())
     }
 
     // =====================================================================
     // Scope analysis (pre-pass) — replaces Python's `symtable`
     // =====================================================================
 
-    /// Gather scope information by walking the AST.
-    fn analyze_scopes(&mut self, source: &str) {
-        let parsed = ruff_python_parser::parse_unchecked(source, ParseOptions::from(Mode::Module));
-        let module = match parsed.syntax() {
-            Mod::Module(m) => m,
-            _ => return,
-        };
-
+    /// Gather scope information by walking the cached AST.
+    fn build_scopes(module: &ModModule, module_ns: &str) -> HashMap<String, ScopeInfo> {
         let mut scopes: HashMap<String, ScopeInfo> = HashMap::new();
-        let module_ns = self.module_name.clone();
 
         // Module-level scope
         let mut module_scope = ScopeInfo::new("");
-        self.collect_scope_defs(&module.body, &mut module_scope);
-        scopes.insert(module_ns.clone(), module_scope);
+        Self::collect_scope_defs(&module.body, &mut module_scope);
+        scopes.insert(module_ns.to_string(), module_scope);
 
         // Nested scopes
-        self.collect_nested_scopes(&module.body, &module_ns, &mut scopes);
+        Self::collect_nested_scopes(&module.body, module_ns, &mut scopes);
 
+        scopes
+    }
+
+    fn merge_scopes(&mut self, scopes: &HashMap<String, ScopeInfo>) {
         // Merge into existing scopes (union values rather than overwrite)
         for (ns, sc) in scopes {
-            if let Some(existing) = self.scopes.get_mut(&ns) {
-                for (name, vs) in sc.defs {
-                    existing.defs.entry(name).or_default().union_with(&vs);
+            if let Some(existing) = self.scopes.get_mut(ns.as_str()) {
+                for (name, vs) in &sc.defs {
+                    existing
+                        .defs
+                        .entry(name.clone())
+                        .or_default()
+                        .union_with(vs);
                 }
-                for (name, facts) in sc.containers {
+                for (name, facts) in &sc.containers {
                     existing
                         .containers
-                        .entry(name)
+                        .entry(name.clone())
                         .or_default()
-                        .union_with(&facts);
+                        .union_with(facts);
                 }
                 // Propagate __all__ if newly discovered.
                 if existing.all_exports.is_none() && sc.all_exports.is_some() {
-                    existing.all_exports = sc.all_exports;
+                    existing.all_exports = sc.all_exports.clone();
                 }
             } else {
-                self.scopes.insert(ns, sc);
+                self.scopes.insert(ns.clone(), sc.clone());
             }
         }
     }
 
     /// Collect names defined (bound) at this scope level.
-    fn collect_scope_defs(&self, stmts: &[Stmt], scope: &mut ScopeInfo) {
+    fn collect_scope_defs(stmts: &[Stmt], scope: &mut ScopeInfo) {
         for stmt in stmts {
             match stmt {
                 Stmt::FunctionDef(f) => {
@@ -503,17 +527,17 @@ impl AnalysisSession {
                                 }
                             }
                         }
-                        self.collect_assign_target_names(target, scope);
+                        Self::collect_assign_target_names(target, scope);
                     }
                 }
                 Stmt::AugAssign(a) => {
-                    self.collect_assign_target_names(&a.target, scope);
+                    Self::collect_assign_target_names(&a.target, scope);
                 }
                 Stmt::AnnAssign(a) => {
-                    self.collect_assign_target_names(&a.target, scope);
+                    Self::collect_assign_target_names(&a.target, scope);
                 }
                 Stmt::For(f) => {
-                    self.collect_assign_target_names(&f.target, scope);
+                    Self::collect_assign_target_names(&f.target, scope);
                     // Do NOT recurse into body for scope defs at *this* level;
                     // we only capture the target bindings.
                 }
@@ -530,35 +554,35 @@ impl AnalysisSession {
                 // If/While/With/Try — recurse into their bodies at the same
                 // scope level (Python does not create new scopes for these).
                 Stmt::If(s) => {
-                    self.collect_scope_defs(&s.body, scope);
+                    Self::collect_scope_defs(&s.body, scope);
                     for clause in &s.elif_else_clauses {
-                        self.collect_scope_defs(&clause.body, scope);
+                        Self::collect_scope_defs(&clause.body, scope);
                     }
                 }
                 Stmt::While(s) => {
-                    self.collect_scope_defs(&s.body, scope);
-                    self.collect_scope_defs(&s.orelse, scope);
+                    Self::collect_scope_defs(&s.body, scope);
+                    Self::collect_scope_defs(&s.orelse, scope);
                 }
                 Stmt::With(s) => {
                     for item in &s.items {
                         if let Some(ref vars) = item.optional_vars {
-                            self.collect_assign_target_names(vars, scope);
+                            Self::collect_assign_target_names(vars, scope);
                         }
                     }
-                    self.collect_scope_defs(&s.body, scope);
+                    Self::collect_scope_defs(&s.body, scope);
                 }
                 Stmt::Try(s) => {
-                    self.collect_scope_defs(&s.body, scope);
+                    Self::collect_scope_defs(&s.body, scope);
                     for handler in &s.handlers {
                         let ExceptHandler::ExceptHandler(h) = handler;
                         if let Some(ref name) = h.name {
                             scope.defs.entry(name.id.to_string()).or_default();
                             scope.locals.insert(name.id.to_string());
                         }
-                        self.collect_scope_defs(&h.body, scope);
+                        Self::collect_scope_defs(&h.body, scope);
                     }
-                    self.collect_scope_defs(&s.orelse, scope);
-                    self.collect_scope_defs(&s.finalbody, scope);
+                    Self::collect_scope_defs(&s.orelse, scope);
+                    Self::collect_scope_defs(&s.finalbody, scope);
                 }
                 _ => {}
             }
@@ -567,7 +591,6 @@ impl AnalysisSession {
 
     /// Recurse into function/class bodies to create child scopes.
     fn collect_nested_scopes(
-        &self,
         stmts: &[Stmt],
         parent_ns: &str,
         scopes: &mut HashMap<String, ScopeInfo>,
@@ -606,45 +629,45 @@ impl AnalysisSession {
                         scope.locals.insert(pname);
                     }
 
-                    self.collect_scope_defs(&f.body, &mut scope);
+                    Self::collect_scope_defs(&f.body, &mut scope);
                     scopes.insert(ns.clone(), scope);
-                    self.collect_nested_scopes(&f.body, &ns, scopes);
+                    Self::collect_nested_scopes(&f.body, &ns, scopes);
                 }
                 Stmt::ClassDef(c) => {
                     let name = c.name.id.to_string();
                     let ns = format!("{parent_ns}.{name}");
                     let mut scope = ScopeInfo::new(&name);
-                    self.collect_scope_defs(&c.body, &mut scope);
+                    Self::collect_scope_defs(&c.body, &mut scope);
                     scopes.insert(ns.clone(), scope);
-                    self.collect_nested_scopes(&c.body, &ns, scopes);
+                    Self::collect_nested_scopes(&c.body, &ns, scopes);
                 }
                 // Recurse into compound statements that don't create new
                 // scopes (if/while/with/try/for).
                 Stmt::If(s) => {
-                    self.collect_nested_scopes(&s.body, parent_ns, scopes);
+                    Self::collect_nested_scopes(&s.body, parent_ns, scopes);
                     for clause in &s.elif_else_clauses {
-                        self.collect_nested_scopes(&clause.body, parent_ns, scopes);
+                        Self::collect_nested_scopes(&clause.body, parent_ns, scopes);
                     }
                 }
                 Stmt::While(s) => {
-                    self.collect_nested_scopes(&s.body, parent_ns, scopes);
-                    self.collect_nested_scopes(&s.orelse, parent_ns, scopes);
+                    Self::collect_nested_scopes(&s.body, parent_ns, scopes);
+                    Self::collect_nested_scopes(&s.orelse, parent_ns, scopes);
                 }
                 Stmt::For(s) => {
-                    self.collect_nested_scopes(&s.body, parent_ns, scopes);
-                    self.collect_nested_scopes(&s.orelse, parent_ns, scopes);
+                    Self::collect_nested_scopes(&s.body, parent_ns, scopes);
+                    Self::collect_nested_scopes(&s.orelse, parent_ns, scopes);
                 }
                 Stmt::With(s) => {
-                    self.collect_nested_scopes(&s.body, parent_ns, scopes);
+                    Self::collect_nested_scopes(&s.body, parent_ns, scopes);
                 }
                 Stmt::Try(s) => {
-                    self.collect_nested_scopes(&s.body, parent_ns, scopes);
+                    Self::collect_nested_scopes(&s.body, parent_ns, scopes);
                     for handler in &s.handlers {
                         let ExceptHandler::ExceptHandler(h) = handler;
-                        self.collect_nested_scopes(&h.body, parent_ns, scopes);
+                        Self::collect_nested_scopes(&h.body, parent_ns, scopes);
                     }
-                    self.collect_nested_scopes(&s.orelse, parent_ns, scopes);
-                    self.collect_nested_scopes(&s.finalbody, parent_ns, scopes);
+                    Self::collect_nested_scopes(&s.orelse, parent_ns, scopes);
+                    Self::collect_nested_scopes(&s.finalbody, parent_ns, scopes);
                 }
                 _ => {}
             }
@@ -652,7 +675,7 @@ impl AnalysisSession {
     }
 
     /// Extract names from an assignment target expression.
-    fn collect_assign_target_names(&self, target: &Expr, scope: &mut ScopeInfo) {
+    fn collect_assign_target_names(target: &Expr, scope: &mut ScopeInfo) {
         match target {
             Expr::Name(n) => {
                 let name = n.id.to_string();
@@ -661,16 +684,16 @@ impl AnalysisSession {
             }
             Expr::Tuple(t) => {
                 for elt in &t.elts {
-                    self.collect_assign_target_names(elt, scope);
+                    Self::collect_assign_target_names(elt, scope);
                 }
             }
             Expr::List(l) => {
                 for elt in &l.elts {
-                    self.collect_assign_target_names(elt, scope);
+                    Self::collect_assign_target_names(elt, scope);
                 }
             }
             Expr::Starred(s) => {
-                self.collect_assign_target_names(&s.value, scope);
+                Self::collect_assign_target_names(&s.value, scope);
             }
             _ => {} // Attribute, Subscript — not local bindings
         }
