@@ -14,17 +14,23 @@ optimize for a narrow claim:
 
 ## Current Phase
 
-`pycg-rs` appears to be past the "prove the core idea" stage.
+`pycg-rs` is past the "prove the core idea" stage and approaching maintenance
+mode.
 
-It already has:
+It has:
 
-- A working analyzer.
-- Multiple output formats.
-- CI and benchmark scaffolding.
-- Corpus smoke coverage.
-- Enough internal structure to support further hardening.
-
-That suggests a maintenance-first development posture, but not a freeze.
+- A working analyzer with 41 accuracy cases (86 expectations across 18
+  categories) and 3 corpus smoke tests against real-world repos.
+- Multiple output formats (DOT, TGF, text, JSON) with versioned JSON schemas
+  for all 7 subcommands (`docs/json-schema/`).
+- 6 focused query commands: `callees`, `callers`, `neighbors`, `path`,
+  `summary`, `symbols-in`.
+- CI running lint, format, tests, and corpus tests (with corpora cloned).
+- A multi-tool comparison harness (`benchmarks/compare.py`) benchmarking
+  against jarviscg, pyan3, code2flow, and PyCG original.
+- A published report site with corpus analysis results and module dependency
+  graphs.
+- Honest limitations documentation (`docs/limitations.md`).
 
 The right mode is:
 
@@ -38,81 +44,100 @@ The right mode is:
 This is the most important investment because it supports the project's core
 claim and directly affects downstream trust.
 
-Recommended work:
+Done:
 
-- Build a stronger semantic evaluation corpus.
-- Add expected-edge and expected-absence fixtures where feasible.
-- Compare against stale alternatives with a reproducible harness.
-- Document unsupported patterns clearly instead of silently failing.
-- Track regressions over time in CI or scheduled reports.
+- 41 accuracy cases with 86 expectations (81 presence, 5 absence) across 18
+  categories: aliasing, async, branch_join, builtins, chained_calls, closures,
+  containers, decorators, definitions, destructuring, higher_order, imports,
+  inheritance, multi_return, precision, protocols, returns, unknowns.
+- Reproducible comparison harness (`benchmarks/compare.py`) against jarviscg
+  (78%), pyan3 (52%), and PyCG (crashes on Python 3.12+). pycg-rs scores
+  100% on all 86 expectations.
+- Corpus smoke tests on requests, rich, flask with semantic edge assertions.
+- `docs/limitations.md` documents strengths, partial areas, and weak/unsupported
+  patterns honestly.
 
-Questions to answer:
+Remaining:
 
-- On which classes of Python code does `pycg-rs` materially outperform other
-  tools?
-- Where does it remain weaker?
-- What claims can be made honestly in the README and report site?
+- Expand expected-absence fixtures (currently 5 of 86; more would strengthen
+  precision claims).
+- Add accuracy cases for partial/weak areas (framework decorators, attribute-heavy
+  OO, dynamic dispatch) to track improvement over time.
+- Track regressions via scheduled `compare.py` runs.
 
 ## 2. Performance on Real Workloads
 
 Performance matters because this tool is meant to sit inside repeated analysis
 loops.
 
-Recommended work:
+Done:
 
-- Profile representative repositories instead of optimizing blindly.
-- Continue improving hot paths only when profiles justify it.
-- Preserve fast module-level workflows.
-- Consider partial analysis or indexed execution later if repeated invocation
-  becomes dominant.
+- `benchmarks/bench.py` measures 9 real-world corpora against 4 competitor
+  tools. pycg-rs is 3-17x faster across all benchmarks.
+- Analysis completes in 18-228ms on representative packages.
 
-The goal is not just a good benchmark table. The goal is a tool that feels
-cheap enough to call constantly.
+Remaining:
+
+- Profile-driven optimization on hot paths.
+- Partial/incremental analysis for repeated invocation workflows.
+- Perf regression gate in CI (no baseline tracked yet).
 
 ## 3. Query-Oriented CLI Design
 
 Whole-graph export is useful, but it is not the highest-leverage interface for
 agentic systems.
 
-Recommended work:
+Done:
 
-- Define a small set of focused query commands.
-- Add symbol/module/path filters.
-- Add structural summaries suitable for routing downstream reasoning.
-- Add graph neighborhood and path queries.
-- Consider impact-analysis and revision-diff workflows if they match real use.
+- 6 focused query commands: `callees`, `callers`, `neighbors`, `path`,
+  `summary`, `symbols-in`.
+- `--match suffix` for fuzzy symbol lookup.
+- JSON and text output for all queries.
 
-If a future LLM tool needs to decide what code to inspect next, this layer
-should provide that cheaply.
+Remaining:
+
+- Symbol/module/path filter flags on `analyze` (e.g. "edges touching this
+  module only").
+- Impact-analysis and revision-diff workflows.
+- Structural summaries for routing downstream reasoning.
 
 ## 4. JSON Contract and Provenance
 
 If other tools depend on `pycg-rs`, the machine-readable interface becomes the
 real API.
 
-Recommended work:
+Done:
 
-- Add schema versioning.
-- Make output ordering deterministic and documented.
-- Include provenance fields consistently.
-- Preserve stable node identity conventions.
-- Add explicit analysis metadata for skipped or uncertain cases.
+- Versioned JSON schemas for all 7 subcommands in `docs/json-schema/`.
+- `schema_version`, `tool`, `analysis`, `diagnostics`, `stats` fields in output.
+- Provenance fields (tool version, analyzed files, graph mode) included
+  consistently.
 
-This is where the project becomes a dependable primitive rather than a useful
-demo.
+Remaining:
+
+- Documented deterministic ordering guarantees.
+- Explicit metadata for skipped or uncertain cases in query results.
+- Versioning policy documentation.
 
 ## 5. Testing and Trust Signals
 
 Testing should evolve from "is the graph non-degenerate?" toward "does this
 analysis support the claims we want to make?"
 
-Recommended work:
+Done:
 
-- Tighten integration assertions.
-- Expand corpus invariants.
-- Add regression cases for tricky language features.
-- Keep CLI snapshot coverage for stable output behavior.
-- Prefer targeted semantic checks over weak count thresholds.
+- Corpus tests use semantic edge assertions (not just count thresholds).
+- Corpus tests marked `#[ignore]` (visible, not silently passing) and run in CI
+  with real repos cloned.
+- 3 regression tests (issues #2, #3, #5) verify structural defines edges.
+- 205+ tests total.
+
+Remaining:
+
+- CLI snapshot tests for stable output behavior.
+- More regression cases for tricky patterns (metaclasses, `__init_subclass__`,
+  complex decorator stacks).
+- Expand corpus test suite beyond requests/rich/flask.
 
 ## 6. Maintenance and Refactoring
 

@@ -645,6 +645,265 @@
           "present": true
         }
       ]
+    },
+
+    {
+      "id": "inheritance.method_lookup_via_base",
+      "category": "inheritance",
+      "files": ["tests/test_code/features.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "test_code.features.Derived.baz",
+          "source_match": "full",
+          "target": "test_code.features.Base.foo",
+          "target_match": "concrete_full",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "test_code.features.Derived.baz",
+          "source_match": "full",
+          "target": "test_code.features.Base.bar",
+          "target_match": "concrete_full",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "inheritance.self_call_resolves_to_base",
+      "category": "inheritance",
+      "files": ["tests/test_code/features.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "test_code.features.Base.bar",
+          "source_match": "full",
+          "target": "test_code.features.Base.foo",
+          "target_match": "concrete_full",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "inheritance.mro_grandchild",
+      "category": "inheritance",
+      "files": ["tests/test_code/resolution_coverage.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "test_code.resolution_coverage.mro_grandchild",
+          "source_match": "full",
+          "target": "test_code.resolution_coverage.GrandParent.inherited",
+          "target_match": "concrete_full",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "inheritance.super_call",
+      "category": "inheritance",
+      "files": ["tests/test_code/super_coverage.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "test_code.super_coverage.Derived.greet",
+          "source_match": "full",
+          "target": "test_code.super_coverage.Base.greet",
+          "target_match": "concrete_full",
+          "present": true
+        }
+      ]
+    },
+
+    {
+      "id": "definitions.module_defines_class_and_function",
+      "category": "definitions",
+      "files": ["tests/test_code/features.py"],
+      "expectations": [
+        {
+          "kind": "defines",
+          "source": "features",
+          "target": "Base",
+          "present": true
+        },
+        {
+          "kind": "defines",
+          "source": "features",
+          "target": "Derived",
+          "present": true
+        },
+        {
+          "kind": "defines",
+          "source": "features",
+          "target": "outer",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "definitions.class_defines_methods",
+      "category": "definitions",
+      "files": ["tests/test_code/features.py"],
+      "expectations": [
+        {
+          "kind": "defines",
+          "source": "Decorated",
+          "target": "static_method",
+          "present": true
+        },
+        {
+          "kind": "defines",
+          "source": "Decorated",
+          "target": "class_method",
+          "present": true
+        },
+        {
+          "kind": "defines",
+          "source": "Decorated",
+          "target": "my_prop",
+          "present": true
+        },
+        {
+          "kind": "defines",
+          "source": "Decorated",
+          "target": "regular",
+          "present": true
+        }
+      ]
+    },
+
+    {
+      "id": "imports.relative_from_import",
+      "category": "imports",
+      "files": [
+        "tests/test_code/import_coverage/user.py",
+        "tests/test_code/import_coverage/sibling.py",
+        "tests/test_code/import_coverage/deep/inner.py"
+      ],
+      "root": "tests",
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "test_code.import_coverage.user.caller",
+          "source_match": "full",
+          "target": "test_code.import_coverage.sibling.sibling_func",
+          "target_match": "concrete_full",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "test_code.import_coverage.user.caller",
+          "source_match": "full",
+          "target": "test_code.import_coverage.deep.inner.deep_func",
+          "target_match": "concrete_full",
+          "present": true
+        }
+      ]
+    },
+
+    {
+      "id": "destructuring.starred_positional",
+      "category": "destructuring",
+      "files": ["tests/test_code/features.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "test_code.features.star_at_end",
+          "source_match": "full",
+          "target": "test_code.features.Alpha.alpha_method",
+          "target_match": "concrete_full",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "test_code.features.star_at_end",
+          "source_match": "full",
+          "target": "test_code.features.Beta.beta_method",
+          "target_match": "concrete_full",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "test_code.features.star_in_middle",
+          "source_match": "full",
+          "target": "test_code.features.Alpha.alpha_method",
+          "target_match": "concrete_full",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "test_code.features.star_in_middle",
+          "source_match": "full",
+          "target": "test_code.features.Delta.delta_method",
+          "target_match": "concrete_full",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "test_code.features.star_at_start",
+          "source_match": "full",
+          "target": "test_code.features.Gamma.gamma_method",
+          "target_match": "concrete_full",
+          "present": true
+        }
+      ]
+    },
+
+    {
+      "id": "closures.inner_call",
+      "category": "closures",
+      "files": ["tests/test_code/features.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "test_code.features.outer",
+          "source_match": "full",
+          "target": "test_code.features.outer.inner",
+          "target_match": "concrete_full",
+          "present": true
+        }
+      ]
+    },
+
+    {
+      "id": "async.await_call",
+      "category": "async",
+      "files": ["tests/test_code/features.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "test_code.features.process",
+          "source_match": "full",
+          "target": "test_code.features.fetch",
+          "target_match": "concrete_full",
+          "present": true
+        }
+      ]
+    },
+
+    {
+      "id": "context_manager.protocol_edges",
+      "category": "protocols",
+      "files": ["tests/test_code/features.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "test_code.features.use_ctx",
+          "source_match": "full",
+          "target": "test_code.features.MyCtx.__enter__",
+          "target_match": "concrete_full",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "test_code.features.use_ctx",
+          "source_match": "full",
+          "target": "test_code.features.MyCtx.__exit__",
+          "target_match": "concrete_full",
+          "present": true
+        }
+      ]
     }
   ]
 }
