@@ -1,0 +1,503 @@
+{
+  "cases": [
+    {
+      "id": "alias.simple_alias",
+      "category": "aliasing",
+      "files": ["tests/test_code/accuracy_alias.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "simple_alias_caller",
+          "target": "target_one",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "simple_alias_caller",
+          "target": "target_two",
+          "present": false
+        }
+      ]
+    },
+    {
+      "id": "alias.chained_alias",
+      "category": "aliasing",
+      "files": ["tests/test_code/accuracy_alias.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "chained_alias_caller",
+          "target": "target_one",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "chained_alias_caller",
+          "target": "target_two",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "alias.branch_alias",
+      "category": "aliasing",
+      "files": ["tests/test_code/accuracy_alias.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "branch_alias_caller",
+          "target": "func_a",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "branch_alias_caller",
+          "target": "func_b",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "alias.local_rebind",
+      "category": "aliasing",
+      "files": ["tests/test_code/accuracy_alias.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "local_rebind_caller",
+          "target": "func_a",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "local_rebind_caller",
+          "target": "bar",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "factory.return_flow",
+      "category": "returns",
+      "files": ["tests/test_code/accuracy_factory.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "consumer",
+          "target": "factory",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "factory",
+          "target": "Product",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "consumer",
+          "target": "make",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "returns.multi_pass_propagation",
+      "category": "returns",
+      "files": ["tests/test_code/propagation_depth.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "consumer",
+          "target": "make",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "decorators.application",
+      "category": "decorators",
+      "files": ["tests/test_code/accuracy_decorator.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "accuracy_decorator",
+          "target": "simple_decorator",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "accuracy_decorator",
+          "target": "factory_decorator",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "decorator",
+          "target": "factory_decorated",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "decorators.decorated_calls",
+      "category": "decorators",
+      "files": ["tests/test_code/accuracy_decorator.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "call_decorated",
+          "target": "simple_decorated",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "call_decorated",
+          "target": "factory_decorated",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "containers.list_subscript",
+      "category": "containers",
+      "files": ["tests/test_code/accuracy_container.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "list_subscript_caller",
+          "target": "func_a",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "list_subscript_caller",
+          "target": "func_b",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "containers.dict_subscript",
+      "category": "containers",
+      "files": ["tests/test_code/accuracy_container.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "dict_subscript_caller",
+          "target": "func_a",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "dict_subscript_caller",
+          "target": "func_c",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "containers.list_method_subscript",
+      "category": "containers",
+      "files": ["tests/test_code/accuracy_container.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "list_subscript_method_caller",
+          "target": "handle_a",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "list_subscript_method_caller",
+          "target": "handle_b",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "containers.dict_method_subscript",
+      "category": "containers",
+      "files": ["tests/test_code/accuracy_container.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "dict_subscript_method_caller",
+          "target": "handle_a",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "dict_subscript_method_caller",
+          "target": "handle_b",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "imports.star_import",
+      "category": "imports",
+      "files": [
+        "tests/test_code/accuracy_star_src.py",
+        "tests/test_code/accuracy_star_user.py"
+      ],
+      "root": "tests",
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "star_import_caller",
+          "target": "exported_func1",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "star_import_caller",
+          "target": "exported_func2",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "imports.star_import_all_exports",
+      "category": "imports",
+      "files": [
+        "tests/test_code/star_all_src.py",
+        "tests/test_code/star_all_user.py"
+      ],
+      "root": "tests",
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "all_aware_caller",
+          "target": "public_exported",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "all_aware_caller",
+          "target": "_special_exported",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "all_aware_caller",
+          "target": "public_not_exported",
+          "present": false
+        },
+        {
+          "kind": "uses",
+          "source": "all_aware_caller",
+          "target": "_private_not_exported",
+          "present": false
+        }
+      ]
+    },
+    {
+      "id": "imports.star_import_privacy_filter",
+      "category": "imports",
+      "files": [
+        "tests/test_code/star_private_src.py",
+        "tests/test_code/star_private_user.py"
+      ],
+      "root": "tests",
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "privacy_checker",
+          "target": "public_func",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "privacy_checker",
+          "target": "_private_impl",
+          "present": false
+        }
+      ]
+    },
+    {
+      "id": "imports.reexport_chain",
+      "category": "imports",
+      "files": [
+        "tests/test_code/accuracy_reexport/__init__.py",
+        "tests/test_code/accuracy_reexport/impl.py",
+        "tests/test_code/accuracy_reexport/user.py"
+      ],
+      "root": "tests",
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "accuracy_reexport",
+          "target": "reexport_func",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "reexport_caller",
+          "target": "reexport_func",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "higher_order.factory_return",
+      "category": "higher_order",
+      "files": ["tests/test_code/accuracy_higher_order.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "call_via_factory",
+          "target": "make_greeter",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "call_via_factory",
+          "target": "greet",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "higher_order.assigned_return",
+      "category": "higher_order",
+      "files": ["tests/test_code/accuracy_higher_order.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "call_returned_fn",
+          "target": "get_adder",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "call_returned_fn",
+          "target": "add_nums",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "chains.direct_call_result",
+      "category": "chained_calls",
+      "files": ["tests/test_code/accuracy_chained_call.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "direct_chain_caller",
+          "target": "make",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "direct_chain_caller",
+          "target": "render",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "chains.two_hop_chain",
+      "category": "chained_calls",
+      "files": ["tests/test_code/accuracy_chained_call.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "two_hop_chain_caller",
+          "target": "make_container",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "two_hop_chain_caller",
+          "target": "contents",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "two_hop_chain_caller",
+          "target": "render",
+          "present": true
+        }
+      ]
+    },
+    {
+      "id": "multi_return.direct",
+      "category": "multi_return",
+      "files": ["tests/test_code/accuracy_multi_return.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "multi_return_caller",
+          "target": "choose",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "multi_return_caller",
+          "target": "method",
+          "target_match": "concrete_short",
+          "present": true,
+          "min_matches": 2
+        }
+      ]
+    },
+    {
+      "id": "multi_return.wrapped",
+      "category": "multi_return",
+      "files": ["tests/test_code/accuracy_multi_return.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "wrapped_multi_return_caller",
+          "target": "wrap",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "wrap",
+          "target": "choose",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "wrapped_multi_return_caller",
+          "target": "method",
+          "target_match": "concrete_short",
+          "present": true,
+          "min_matches": 2
+        }
+      ]
+    },
+    {
+      "id": "branch_join.if_else",
+      "category": "branch_join",
+      "files": ["tests/test_code/accuracy_branch.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "caller",
+          "target": "method",
+          "target_match": "concrete_short",
+          "present": true,
+          "min_matches": 2
+        }
+      ]
+    },
+    {
+      "id": "branch_join.conditional_rebind",
+      "category": "branch_join",
+      "files": ["tests/test_code/accuracy_branch.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "conditional_rebind_caller",
+          "target": "method",
+          "target_match": "concrete_short",
+          "present": true,
+          "min_matches": 2
+        }
+      ]
+    }
+  ]
+}

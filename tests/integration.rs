@@ -4,6 +4,8 @@
 
 #[path = "integration/accuracy.rs"]
 mod accuracy;
+#[path = "integration/accuracy_cases.rs"]
+mod accuracy_cases;
 #[path = "integration/common.rs"]
 mod common;
 #[path = "integration/core.rs"]

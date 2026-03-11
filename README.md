@@ -162,6 +162,13 @@ cargo build --release
 cargo test --all-targets
 ```
 
+Semantic accuracy fixtures are tracked separately from the broader integration
+suite. To run the declarative fixture report against the CLI:
+
+```bash
+python3 scripts/accuracy_report.py --pycg ./target/release/pycg
+```
+
 Corpus-scale smoke tests run the full analysis pipeline over vendored real-world packages (`requests`, `flask`, `rich`) and assert non-degenerate graph statistics. They skip automatically when the corpora are absent (e.g. a fresh clone), so `cargo test --all-targets` stays green without them.
 
 To clone the corpora (and the `pyan`/`PyCG` reference repos) locally:
