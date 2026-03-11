@@ -127,6 +127,8 @@ The machine-readable contract is documented in
 [`docs/json-contract.md`](docs/json-contract.md).
 Planned query-oriented CLI result shapes are sketched in
 [`docs/query-contracts.md`](docs/query-contracts.md).
+Known limitations, confidence guidance, and how to interpret `diagnostics` are
+documented in [`docs/limitations.md`](docs/limitations.md).
 Initial query JSON Schemas live in [`docs/json-schema/`](docs/json-schema/).
 The corresponding JSON Schema lives at
 [`docs/json-schema/pycg-graph-v1.schema.json`](docs/json-schema/pycg-graph-v1.schema.json).
@@ -212,9 +214,14 @@ The benchmark harness bootstraps the same corpora used by the smoke tests. Resul
 
 ## Current limitations
 
-- This is still narrower than `pyan3` in some dynamic-language corner cases.
-- Corpus runs are smoke tests, not full semantic validation against a gold standard.
-- Benchmark numbers are wall-clock comparisons and should be treated as directional.
+- Dynamic Python patterns, framework-driven indirection, and external-library
+  behavior are only partially modeled.
+- Corpus runs are smoke tests, not full semantic validation against a gold
+  standard.
+- Benchmark numbers are wall-clock comparisons and should be treated as
+  directional.
+- See [`docs/limitations.md`](docs/limitations.md) for confidence guidance and
+  how to interpret JSON/query `diagnostics`.
 
 ## License
 
