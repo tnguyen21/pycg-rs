@@ -3,6 +3,7 @@
 //! Provides functions to serialize a [`VisualGraph`] into DOT (GraphViz),
 //! TGF (Trivial Graph Format), plain text, and JSON.
 
+use crate::analyzer::AnalysisDiagnostics;
 use crate::node::{Node, NodeId};
 use crate::visgraph::{VisualGraph, VisualNode};
 use serde::Serialize;
@@ -432,6 +433,240 @@ fn node_name_and_namespace(node: &Node, canonical_name: &str) -> (String, Option
     (canonical_name.to_string(), None)
 }
 
+fn diagnostic_location(
+    node: &Node,
+    path_formatter: &PathFormatter,
+) -> (Option<String>, Option<usize>) {
+    (
+        node.filename
+            .as_ref()
+            .map(|filename| path_formatter.format_location(filename)),
+        node.line,
+    )
+}
+
+fn build_json_diagnostics(
+    nodes_arena: &[Node],
+    defined: &HashSet<NodeId>,
+    uses_edges: &HashMap<NodeId, HashSet<NodeId>>,
+    node_ids: &HashMap<NodeId, String>,
+    analyzer_diagnostics: &AnalysisDiagnostics,
+    graph_mode: &JsonGraphMode,
+    path_formatter: &PathFormatter,
+) -> JsonDiagnostics {
+    let mut warnings: Vec<JsonWarning> = Vec::new();
+    let mut unresolved_references: Vec<JsonUnresolvedReference> = Vec::new();
+    let mut external_references: Vec<JsonExternalReference> = Vec::new();
+    let mut ambiguous_resolutions: Vec<JsonAmbiguousResolution> = Vec::new();
+    let mut approximations: Vec<JsonApproximation> = Vec::new();
+
+    let mut unresolved_seen: HashSet<(NodeId, String)> = HashSet::new();
+
+    let canonical_name_to_output_id: HashMap<String, String> = node_ids
+        .iter()
+        .map(|(node_id, output_id)| (nodes_arena[*node_id].get_name(), output_id.clone()))
+        .collect();
+    let path_to_output_id: HashMap<String, String> = node_ids
+        .iter()
+        .filter_map(|(node_id, output_id)| {
+            nodes_arena[*node_id]
+                .filename
+                .as_ref()
+                .map(|filename| (path_formatter.format_location(filename), output_id.clone()))
+        })
+        .collect();
+    let mut unresolved_suppressions: HashSet<(String, String)> = HashSet::new();
+
+    for diagnostic in &analyzer_diagnostics.external_references {
+        let source = match graph_mode {
+            JsonGraphMode::Symbol => canonical_name_to_output_id
+                .get(&diagnostic.source_canonical_name)
+                .cloned(),
+            JsonGraphMode::Module => diagnostic
+                .source_filename
+                .as_ref()
+                .map(|filename| path_formatter.format_location(filename))
+                .and_then(|path| path_to_output_id.get(&path).cloned()),
+        };
+        let Some(source) = source else {
+            continue;
+        };
+
+        unresolved_suppressions.insert((source.clone(), diagnostic.canonical_name.clone()));
+        if matches!(
+            diagnostic.kind,
+            crate::analyzer::ExternalReferenceKind::Import
+        ) && let Some((_, short_name)) = diagnostic.canonical_name.rsplit_once('.')
+        {
+            unresolved_suppressions.insert((source.clone(), short_name.to_string()));
+        }
+
+        external_references.push(JsonExternalReference {
+            kind: diagnostic.kind.as_str().to_string(),
+            source,
+            canonical_name: diagnostic.canonical_name.clone(),
+            path: diagnostic
+                .source_filename
+                .as_ref()
+                .map(|filename| path_formatter.format_location(filename)),
+            line: diagnostic.source_line,
+        });
+    }
+
+    let mut source_ids: Vec<NodeId> = uses_edges.keys().copied().collect();
+    source_ids.sort_unstable();
+
+    for source in source_ids {
+        if !defined.contains(&source) {
+            continue;
+        }
+        let Some(source_id) = node_ids.get(&source).cloned() else {
+            continue;
+        };
+        let source_node = &nodes_arena[source];
+        let (path, line) = diagnostic_location(source_node, path_formatter);
+
+        let mut targets: Vec<NodeId> = uses_edges
+            .get(&source)
+            .map(|targets| targets.iter().copied().collect())
+            .unwrap_or_default();
+        targets.sort_unstable_by(|a, b| {
+            let left = &nodes_arena[*a];
+            let right = &nodes_arena[*b];
+            (&left.namespace, &left.name, left.flavor.specificity()).cmp(&(
+                &right.namespace,
+                &right.name,
+                right.flavor.specificity(),
+            ))
+        });
+
+        let mut concrete_groups: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
+
+        for target in targets {
+            let node = &nodes_arena[target];
+            if node.namespace.is_none() {
+                // Implicit constructor lookup frequently creates a synthetic
+                // unresolved `__init__` edge when a class has no explicit
+                // initializer. That is implementation noise, not a useful
+                // refactor diagnostic.
+                if node.name == "__init__"
+                    || node.name.starts_with("^^^")
+                    || unresolved_suppressions.contains(&(source_id.clone(), node.name.clone()))
+                {
+                    continue;
+                }
+                let key = (source, node.name.clone());
+                if unresolved_seen.insert(key) {
+                    unresolved_references.push(JsonUnresolvedReference {
+                        kind: "use".to_string(),
+                        source: source_id.clone(),
+                        symbol: node.name.clone(),
+                        path: path.clone(),
+                        line,
+                    });
+                }
+                continue;
+            }
+
+            concrete_groups
+                .entry(node.name.clone())
+                .or_default()
+                .push(target);
+        }
+
+        for (symbol, mut candidate_targets) in concrete_groups {
+            candidate_targets.sort_unstable();
+            candidate_targets.dedup();
+            if candidate_targets.len() < 2 {
+                continue;
+            }
+
+            let candidate_target_ids: Vec<String> = candidate_targets
+                .iter()
+                .filter_map(|target| node_ids.get(target).cloned())
+                .collect();
+            if candidate_target_ids.len() < 2 {
+                continue;
+            }
+
+            ambiguous_resolutions.push(JsonAmbiguousResolution {
+                kind: "use".to_string(),
+                source: source_id.clone(),
+                symbol: symbol.clone(),
+                candidate_targets: candidate_target_ids.clone(),
+                path: path.clone(),
+                line,
+            });
+            approximations.push(JsonApproximation {
+                kind: "resolution_widening".to_string(),
+                source: source_id.clone(),
+                symbol: Some(symbol),
+                reason: "multiple_candidate_targets".to_string(),
+                candidate_targets: candidate_target_ids,
+                path: path.clone(),
+                line,
+            });
+        }
+    }
+
+    warnings.sort_by(|a, b| {
+        (&a.code, &a.message, &a.path, a.line).cmp(&(&b.code, &b.message, &b.path, b.line))
+    });
+    unresolved_references.sort_by(|a, b| {
+        (&a.source, &a.symbol, &a.path, a.line).cmp(&(&b.source, &b.symbol, &b.path, b.line))
+    });
+    ambiguous_resolutions.sort_by(|a, b| {
+        (&a.source, &a.symbol, &a.path, a.line, &a.candidate_targets).cmp(&(
+            &b.source,
+            &b.symbol,
+            &b.path,
+            b.line,
+            &b.candidate_targets,
+        ))
+    });
+    external_references.sort_by(|a, b| {
+        (&a.source, &a.canonical_name, &a.path, a.line).cmp(&(
+            &b.source,
+            &b.canonical_name,
+            &b.path,
+            b.line,
+        ))
+    });
+    approximations.sort_by(|a, b| {
+        (
+            &a.source,
+            &a.reason,
+            &a.symbol,
+            &a.path,
+            a.line,
+            &a.candidate_targets,
+        )
+            .cmp(&(
+                &b.source,
+                &b.reason,
+                &b.symbol,
+                &b.path,
+                b.line,
+                &b.candidate_targets,
+            ))
+    });
+
+    JsonDiagnostics {
+        summary: JsonDiagnosticSummary {
+            warnings: warnings.len(),
+            unresolved_references: unresolved_references.len(),
+            ambiguous_resolutions: ambiguous_resolutions.len(),
+            external_references: external_references.len(),
+            approximations: approximations.len(),
+        },
+        warnings,
+        unresolved_references,
+        ambiguous_resolutions,
+        external_references,
+        approximations,
+    }
+}
+
 /// Render the call graph directly as JSON.
 ///
 /// Unlike the other writers which operate on the visual graph, this serializes
@@ -441,6 +676,7 @@ pub fn write_json(
     defined: &HashSet<NodeId>,
     defines_edges: &HashMap<NodeId, HashSet<NodeId>>,
     uses_edges: &HashMap<NodeId, HashSet<NodeId>>,
+    analyzer_diagnostics: &AnalysisDiagnostics,
     options: &JsonOutputOptions<'_>,
 ) -> String {
     let path_formatter = PathFormatter::new(options.analysis_root, options.inputs);
@@ -537,11 +773,15 @@ pub fn write_json(
 
     edges.sort_by(|a, b| (&a.source, &a.target, a.kind).cmp(&(&b.source, &b.target, b.kind)));
 
-    let warnings: Vec<JsonWarning> = Vec::new();
-    let unresolved_references: Vec<JsonUnresolvedReference> = Vec::new();
-    let ambiguous_resolutions: Vec<JsonAmbiguousResolution> = Vec::new();
-    let external_references: Vec<JsonExternalReference> = Vec::new();
-    let approximations: Vec<JsonApproximation> = Vec::new();
+    let diagnostics = build_json_diagnostics(
+        nodes_arena,
+        defined_set,
+        uses_edges,
+        &node_ids,
+        analyzer_diagnostics,
+        &options.graph_mode,
+        &path_formatter,
+    );
 
     let graph = JsonGraph {
         schema_version: "1",
@@ -572,20 +812,7 @@ pub fn write_json(
         },
         nodes,
         edges,
-        diagnostics: JsonDiagnostics {
-            summary: JsonDiagnosticSummary {
-                warnings: warnings.len(),
-                unresolved_references: unresolved_references.len(),
-                ambiguous_resolutions: ambiguous_resolutions.len(),
-                external_references: external_references.len(),
-                approximations: approximations.len(),
-            },
-            warnings,
-            unresolved_references,
-            ambiguous_resolutions,
-            external_references,
-            approximations,
-        },
+        diagnostics,
     };
 
     serde_json::to_string_pretty(&graph).expect("JSON serialization failed")

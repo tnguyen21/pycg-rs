@@ -65,6 +65,35 @@ pub(super) struct ScopeInfo {
     all_exports: Option<HashSet<String>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExternalReferenceKind {
+    Import,
+    Module,
+}
+
+impl ExternalReferenceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Import => "import",
+            Self::Module => "module",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExternalReferenceDiagnostic {
+    pub source_canonical_name: String,
+    pub source_filename: Option<String>,
+    pub source_line: Option<usize>,
+    pub kind: ExternalReferenceKind,
+    pub canonical_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AnalysisDiagnostics {
+    pub external_references: Vec<ExternalReferenceDiagnostic>,
+}
+
 /// A shallow abstract value: concrete NodeIds plus any statically-known
 /// container literal structure attached to the binding.
 #[derive(Debug, Clone, Default)]
@@ -229,6 +258,9 @@ pub struct CallGraph {
     /// Which nodes have been marked *defined* (have a defines edge from
     /// them, or were created as wildcard nodes).
     pub defined: HashSet<NodeId>,
+
+    /// Analyzer-owned diagnostics that survive graph postprocessing.
+    pub diagnostics: AnalysisDiagnostics,
 
     // File mapping ------------------------------------------------------
     pub(super) module_to_filename: HashMap<String, String>,

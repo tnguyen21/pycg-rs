@@ -1,6 +1,30 @@
 use super::*;
 
 impl AnalysisSession {
+    pub(super) fn record_external_reference(
+        &mut self,
+        source_id: NodeId,
+        kind: ExternalReferenceKind,
+        canonical_name: String,
+    ) {
+        let source = &self.nodes_arena[source_id];
+        let diagnostic = ExternalReferenceDiagnostic {
+            source_canonical_name: source.get_name(),
+            source_filename: source.filename.clone(),
+            source_line: source.line,
+            kind,
+            canonical_name,
+        };
+        if !self
+            .graph
+            .diagnostics
+            .external_references
+            .contains(&diagnostic)
+        {
+            self.graph.diagnostics.external_references.push(diagnostic);
+        }
+    }
+
     pub(super) fn get_node(
         &mut self,
         namespace: Option<&str>,

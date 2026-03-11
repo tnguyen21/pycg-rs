@@ -114,7 +114,7 @@ pycg src/ -vv
 - **dot** — GraphViz DOT format, suitable for rendering with `dot`, `neato`, etc.
 - **tgf** — Trivial Graph Format
 - **text** — Plain text dependency list with `[D]`/`[U]` tags
-- **json** — Machine-readable graph output with nodes, edges, stats, and diagnostics
+- **json** — Machine-readable graph output with nodes, edges, stats, and diagnostics for unresolved, external, ambiguous, and approximated analysis results
 
 Example JSON workflow:
 

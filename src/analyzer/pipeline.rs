@@ -24,6 +24,7 @@ impl AnalysisSession {
                 defines_edges: HashMap::new(),
                 uses_edges: HashMap::new(),
                 defined: HashSet::new(),
+                diagnostics: AnalysisDiagnostics::default(),
                 module_to_filename,
             },
             node_ids_by_key: HashMap::new(),

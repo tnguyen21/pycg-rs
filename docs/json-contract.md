@@ -14,8 +14,6 @@ is not simply to dump internal analyzer state. The goal is to provide:
 - Deterministic ordering and field semantics.
 - Structured diagnostics about uncertainty and analysis limits.
 
-This document describes the target contract before implementation is finalized.
-
 The corresponding JSON Schema lives at
 [`docs/json-schema/pycg-graph-v1.schema.json`](json-schema/pycg-graph-v1.schema.json).
 
@@ -340,6 +338,16 @@ was incomplete, widened, ambiguous, or external.
 The diagnostics section is not the primary graph. It is a structured companion
 to the graph.
 
+Current populated categories:
+
+- `external_references`: captured in the analyzer before unresolved imported or
+  module targets are contracted away
+- `unresolved_references`: derived from remaining unresolved uses after
+  filtering obvious implementation noise
+- `ambiguous_resolutions`: derived when one source retains multiple concrete
+  candidates for the same symbol
+- `approximations`: derived alongside ambiguity when resolution had to widen
+
 Initial shape:
 
 ```json
@@ -363,7 +371,7 @@ Initial shape:
 
 Structured noteworthy events that do not naturally fit the other categories.
 
-Proposed shape:
+Shape:
 
 ```json
 {
@@ -384,7 +392,7 @@ Guidelines:
 References observed during analysis that could not be resolved to a concrete
 emitted node.
 
-Proposed shape:
+Shape:
 
 ```json
 {
@@ -400,7 +408,7 @@ Proposed shape:
 
 References for which multiple targets remained plausible.
 
-Proposed shape:
+Shape:
 
 ```json
 {
@@ -417,7 +425,7 @@ Proposed shape:
 
 References to symbols outside the analyzed input set.
 
-Proposed shape:
+Shape:
 
 ```json
 {
@@ -433,7 +441,7 @@ Proposed shape:
 
 Cases where the analyzer intentionally widened or approximated.
 
-Proposed shape:
+Shape:
 
 ```json
 {

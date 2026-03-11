@@ -135,6 +135,7 @@ fn main() -> Result<()> {
                 &mod_defined,
                 &std::collections::HashMap::new(),
                 &mod_uses,
+                &cg.diagnostics,
                 &JsonOutputOptions {
                     graph_mode: JsonGraphMode::Module,
                     analysis_root: cli.root.as_deref(),
@@ -147,6 +148,7 @@ fn main() -> Result<()> {
                 &cg.defined,
                 &cg.defines_edges,
                 &cg.uses_edges,
+                &cg.diagnostics,
                 &JsonOutputOptions {
                     graph_mode: JsonGraphMode::Symbol,
                     analysis_root: cli.root.as_deref(),

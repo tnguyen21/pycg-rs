@@ -200,3 +200,266 @@ fn cli_errors_when_no_python_files_are_found() {
         "expected missing-file error, got: {stderr}"
     );
 }
+
+#[test]
+fn cli_json_reports_external_references() {
+    let fixture = fixture_path("tests/test_code/regression_issue5.py");
+    let output = run_pycg(&[
+        fixture.to_str().unwrap(),
+        "--format",
+        "json",
+        "--root",
+        "tests",
+    ])
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let json: Value = serde_json::from_slice(&output).expect("valid json output");
+    let external_refs = json["diagnostics"]["external_references"]
+        .as_array()
+        .expect("external references should be an array");
+    assert!(
+        external_refs
+            .iter()
+            .filter_map(|entry| entry["canonical_name"].as_str())
+            .any(|name| name == "numpy" || name == "os.path" || name == "pandas.io.parsers"),
+        "expected diagnostics to include unresolved external imports, got: {external_refs:?}"
+    );
+    let numpy = external_refs
+        .iter()
+        .find(|entry| entry["canonical_name"].as_str() == Some("numpy"))
+        .expect("expected numpy external reference");
+    assert_eq!(numpy["kind"].as_str(), Some("module"));
+    assert_eq!(
+        numpy["path"].as_str(),
+        Some("test_code/regression_issue5.py")
+    );
+    assert_eq!(numpy["line"].as_u64(), Some(1));
+}
+
+#[test]
+fn cli_json_reports_external_references_in_module_mode() {
+    let fixture = fixture_path("tests/test_code/regression_issue5.py");
+    let output = run_pycg(&[
+        fixture.to_str().unwrap(),
+        "--format",
+        "json",
+        "--modules",
+        "--root",
+        "tests",
+    ])
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let json: Value = serde_json::from_slice(&output).expect("valid json output");
+    let node_ids: std::collections::HashSet<&str> = json["nodes"]
+        .as_array()
+        .expect("nodes should be an array")
+        .iter()
+        .filter_map(|node| node["id"].as_str())
+        .collect();
+    let external_refs = json["diagnostics"]["external_references"]
+        .as_array()
+        .expect("external references should be an array");
+    assert!(
+        !external_refs.is_empty(),
+        "expected module-mode external reference diagnostics",
+    );
+    assert!(
+        external_refs.iter().all(|entry| {
+            entry["source"]
+                .as_str()
+                .is_some_and(|source| node_ids.contains(source))
+        }),
+        "expected module-mode external refs to point at emitted module nodes, got: {external_refs:?}"
+    );
+}
+
+#[test]
+fn cli_json_reports_unresolved_references() {
+    let src = fixture_path("tests/test_code/star_private_src.py");
+    let user = fixture_path("tests/test_code/star_private_user.py");
+    let output = run_pycg(&[
+        src.to_str().unwrap(),
+        user.to_str().unwrap(),
+        "--format",
+        "json",
+        "--root",
+        "tests",
+    ])
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let json: Value = serde_json::from_slice(&output).expect("valid json output");
+    let unresolved = json["diagnostics"]["unresolved_references"]
+        .as_array()
+        .expect("unresolved references should be an array");
+    assert!(
+        unresolved
+            .iter()
+            .filter_map(|entry| entry["symbol"].as_str())
+            .any(|symbol| symbol == "_private_impl"),
+        "expected unresolved private star import reference, got: {unresolved:?}"
+    );
+    let private_impl = unresolved
+        .iter()
+        .find(|entry| entry["symbol"].as_str() == Some("_private_impl"))
+        .expect("expected unresolved _private_impl entry");
+    assert_eq!(
+        private_impl["path"].as_str(),
+        Some("test_code/star_private_user.py")
+    );
+    assert_eq!(private_impl["line"].as_u64(), Some(11));
+}
+
+#[test]
+fn cli_json_suppresses_external_and_synthetic_unresolved_noise() {
+    let fixture = fixture_path("tests/test_code/regression_issue5.py");
+    let output = run_pycg(&[
+        fixture.to_str().unwrap(),
+        "--format",
+        "json",
+        "--root",
+        "tests",
+    ])
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let json: Value = serde_json::from_slice(&output).expect("valid json output");
+    let unresolved = json["diagnostics"]["unresolved_references"]
+        .as_array()
+        .expect("unresolved references should be an array");
+    let unresolved_symbols: std::collections::HashSet<&str> = unresolved
+        .iter()
+        .filter_map(|entry| entry["symbol"].as_str())
+        .collect();
+    for suppressed in ["numpy", "os.path", "pandas.io.parsers", "^^^argument^^^"] {
+        assert!(
+            !unresolved_symbols.contains(suppressed),
+            "expected unresolved diagnostics to suppress {suppressed}, got: {unresolved:?}"
+        );
+    }
+}
+
+#[test]
+fn cli_json_reports_ambiguous_resolutions_and_approximations() {
+    let fixture = fixture_path("tests/test_code/accuracy_multi_return.py");
+    let output = run_pycg(&[
+        fixture.to_str().unwrap(),
+        "--format",
+        "json",
+        "--root",
+        "tests",
+    ])
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let json: Value = serde_json::from_slice(&output).expect("valid json output");
+    let ambiguous = json["diagnostics"]["ambiguous_resolutions"]
+        .as_array()
+        .expect("ambiguous resolutions should be an array");
+    assert!(
+        ambiguous.iter().any(|entry| {
+            entry["symbol"].as_str() == Some("method")
+                && entry["candidate_targets"]
+                    .as_array()
+                    .is_some_and(|targets| targets.len() == 2)
+        }),
+        "expected multi-return method ambiguity diagnostics, got: {ambiguous:?}"
+    );
+    let method_resolution = ambiguous
+        .iter()
+        .find(|entry| entry["source"].as_str() == Some("n5"))
+        .expect("expected ambiguity entry for caller");
+    assert_eq!(
+        method_resolution["path"].as_str(),
+        Some("test_code/accuracy_multi_return.py")
+    );
+    assert_eq!(method_resolution["line"].as_u64(), Some(33));
+
+    let approximations = json["diagnostics"]["approximations"]
+        .as_array()
+        .expect("approximations should be an array");
+    assert!(
+        approximations.iter().any(|entry| {
+            entry["reason"].as_str() == Some("multiple_candidate_targets")
+                && entry["symbol"].as_str() == Some("method")
+                && entry["candidate_targets"]
+                    .as_array()
+                    .is_some_and(|targets| targets.len() == 2)
+        }),
+        "expected approximation entry for widened method resolution, got: {approximations:?}"
+    );
+    let approximation = approximations
+        .iter()
+        .find(|entry| entry["source"].as_str() == Some("n5"))
+        .expect("expected approximation entry for caller");
+    assert_eq!(
+        approximation["path"].as_str(),
+        Some("test_code/accuracy_multi_return.py")
+    );
+    assert_eq!(approximation["line"].as_u64(), Some(33));
+}
+
+#[test]
+fn cli_json_reports_three_way_ambiguity() {
+    let fixture = fixture_path("tests/test_code/diagnostics_multi_return_three.py");
+    let output = run_pycg(&[
+        fixture.to_str().unwrap(),
+        "--format",
+        "json",
+        "--root",
+        "tests",
+    ])
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let json: Value = serde_json::from_slice(&output).expect("valid json output");
+    let ambiguous = json["diagnostics"]["ambiguous_resolutions"]
+        .as_array()
+        .expect("ambiguous resolutions should be an array");
+    let three_way = ambiguous
+        .iter()
+        .find(|entry| entry["symbol"].as_str() == Some("method"))
+        .expect("expected a three-way method ambiguity");
+    assert_eq!(
+        three_way["candidate_targets"].as_array().map(Vec::len),
+        Some(3)
+    );
+    assert_eq!(
+        three_way["path"].as_str(),
+        Some("test_code/diagnostics_multi_return_three.py")
+    );
+    assert_eq!(three_way["line"].as_u64(), Some(24));
+
+    let approximations = json["diagnostics"]["approximations"]
+        .as_array()
+        .expect("approximations should be an array");
+    let three_way_approx = approximations
+        .iter()
+        .find(|entry| entry["symbol"].as_str() == Some("method"))
+        .expect("expected a matching approximation entry");
+    assert_eq!(
+        three_way_approx["candidate_targets"]
+            .as_array()
+            .map(Vec::len),
+        Some(3)
+    );
+    assert_eq!(
+        three_way_approx["path"].as_str(),
+        Some("test_code/diagnostics_multi_return_three.py")
+    );
+    assert_eq!(three_way_approx["line"].as_u64(), Some(24));
+}

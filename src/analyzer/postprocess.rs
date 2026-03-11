@@ -269,8 +269,16 @@ impl super::AnalysisSession {
             }
         }
 
-        // Second pass: create wildcard nodes and update edges
+        // Second pass: record diagnostics, create wildcard nodes, and update edges
         for (from, to, name) in to_contract {
+            let external_kind = match self.nodes_arena[to].flavor {
+                Flavor::ImportedItem => Some(super::ExternalReferenceKind::Import),
+                Flavor::Module => Some(super::ExternalReferenceKind::Module),
+                _ => None,
+            };
+            if let Some(kind) = external_kind {
+                self.record_external_reference(from, kind, self.nodes_arena[to].get_name());
+            }
             let wild_id = self.get_node(None, &name, Flavor::Unknown);
             self.defined.remove(&wild_id);
             self.add_uses_edge(from, wild_id);
@@ -489,6 +497,25 @@ mod tests {
             !targets.contains(&imported),
             "import placeholder should be remapped to the concrete target",
         );
+    }
+
+    #[test]
+    fn contract_nonexistents_records_external_references_before_wildcarding() {
+        let mut session = AnalysisSession::new(&[], None);
+        let caller = session.get_node(Some("app"), "caller", Flavor::Function);
+        session.associate_node(caller, "app.py", 12);
+        let external = session.get_node(Some("numpy"), "array", Flavor::ImportedItem);
+        session.add_uses_edge(caller, external);
+
+        session.contract_nonexistents();
+
+        assert_eq!(session.graph.diagnostics.external_references.len(), 1);
+        let diagnostic = &session.graph.diagnostics.external_references[0];
+        assert_eq!(diagnostic.source_canonical_name, "app.caller");
+        assert_eq!(diagnostic.source_filename.as_deref(), Some("app.py"));
+        assert_eq!(diagnostic.source_line, Some(12));
+        assert_eq!(diagnostic.kind.as_str(), "import");
+        assert_eq!(diagnostic.canonical_name, "numpy.array");
     }
 
     #[test]
