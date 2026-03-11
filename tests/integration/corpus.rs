@@ -5,27 +5,29 @@ use crate::common::*;
 // Run the analyzer against real-world vendored Python packages from
 // benchmarks/corpora/ and assert the resulting graph is non-degenerate.
 //
-// Tests skip (pass with a notice) when the corpus directory is absent
-// (e.g. a fresh clone without vendored corpora), so the suite remains
-// green in CI.  They fail if the directory IS present but analysis
-// produces an empty or near-empty graph, which would indicate a
-// regression.
+// These tests are marked `#[ignore]` so they don't silently pass when
+// the corpus directories are absent.  Run them explicitly with:
+//
+//   cargo test -- --ignored          # all ignored tests
+//   cargo test corpus -- --ignored   # just corpus tests
+//
+// CI clones the corpora via scripts/bootstrap-corpora.sh before running.
 // ===================================================================
 
 /// Resolve the path to a specific package subdirectory inside the vendored
-/// corpora.  Returns `None` if the directory does not exist (e.g. the
-/// corpora have not been downloaded).
-fn corpus_dir(package: &str, subpath: &str) -> Option<std::path::PathBuf> {
+/// corpora.  Panics if the directory does not exist.
+fn corpus_dir(package: &str, subpath: &str) -> std::path::PathBuf {
     let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("benchmarks")
         .join("corpora")
         .join(package)
         .join(subpath);
-    if candidate.is_dir() {
-        Some(candidate)
-    } else {
-        None
-    }
+    assert!(
+        candidate.is_dir(),
+        "Corpus directory not found: {candidate:?}\n\
+         Run `scripts/bootstrap-corpora.sh --only-corpora` to download corpora."
+    );
+    candidate
 }
 
 /// Counts of the major node/edge kinds after analysis.
@@ -135,11 +137,9 @@ fn assert_corpus_healthy(
 /// edges that would break only if the analyzer regresses on import resolution,
 /// class instantiation, or attribute access.
 #[test]
+#[ignore] // requires corpora: run with `cargo test -- --ignored`
 fn test_corpus_requests() {
-    let Some(dir) = corpus_dir("requests", "src/requests") else {
-        eprintln!("SKIP test_corpus_requests: benchmarks/corpora/requests/src/requests not found");
-        return;
-    };
+    let dir = corpus_dir("requests", "src/requests");
 
     let (cg, stats) = analyze_corpus(&dir);
 
@@ -178,11 +178,9 @@ fn test_corpus_requests() {
 
 /// Analyze the `rich` package (~78 files).
 #[test]
+#[ignore] // requires corpora: run with `cargo test -- --ignored`
 fn test_corpus_rich() {
-    let Some(dir) = corpus_dir("rich", "rich") else {
-        eprintln!("SKIP test_corpus_rich: benchmarks/corpora/rich/rich not found");
-        return;
-    };
+    let dir = corpus_dir("rich", "rich");
 
     let (cg, stats) = analyze_corpus(&dir);
 
@@ -213,11 +211,9 @@ fn test_corpus_rich() {
 
 /// Analyze the `flask` package (~18 files).
 #[test]
+#[ignore] // requires corpora: run with `cargo test -- --ignored`
 fn test_corpus_flask() {
-    let Some(dir) = corpus_dir("flask", "src/flask") else {
-        eprintln!("SKIP test_corpus_flask: benchmarks/corpora/flask/src/flask not found");
-        return;
-    };
+    let dir = corpus_dir("flask", "src/flask");
 
     let (cg, stats) = analyze_corpus(&dir);
 
