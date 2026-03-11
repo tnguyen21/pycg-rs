@@ -123,6 +123,11 @@ pycg mypackage/ --format json > graph.json
 jq '.stats' graph.json
 ```
 
+The planned machine-readable contract is documented in
+[`docs/json-contract.md`](docs/json-contract.md).
+The corresponding JSON Schema lives at
+[`docs/json-schema/pycg-graph-v1.schema.json`](docs/json-schema/pycg-graph-v1.schema.json).
+
 ## How it works
 
 1. Walks the given files/directories collecting `.py` files

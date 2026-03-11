@@ -1,0 +1,477 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tnguyen21.github.io/pycg-rs/schemas/pycg-graph-v1.schema.json",
+  "title": "pycg-rs graph output v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tool",
+    "graph_mode",
+    "analysis",
+    "stats",
+    "nodes",
+    "edges",
+    "diagnostics"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1"
+    },
+    "tool": {
+      "$ref": "#/$defs/tool"
+    },
+    "graph_mode": {
+      "type": "string",
+      "enum": ["symbol", "module"]
+    },
+    "analysis": {
+      "$ref": "#/$defs/analysis"
+    },
+    "stats": {
+      "$ref": "#/$defs/stats"
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/node"
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/edge"
+      }
+    },
+    "diagnostics": {
+      "$ref": "#/$defs/diagnostics"
+    }
+  },
+  "$defs": {
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inputs", "node_inclusion_policy", "path_kind"],
+      "properties": {
+        "root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "node_inclusion_policy": {
+          "type": "string",
+          "enum": ["defined_only"]
+        },
+        "path_kind": {
+          "type": "string",
+          "enum": ["root_relative", "input_relative", "absolute"]
+        }
+      }
+    },
+    "stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nodes",
+        "edges",
+        "files_analyzed",
+        "by_node_kind",
+        "by_edge_kind"
+      ],
+      "properties": {
+        "nodes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "edges": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "files_analyzed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "by_node_kind": {
+          "$ref": "#/$defs/node_kind_counts"
+        },
+        "by_edge_kind": {
+          "$ref": "#/$defs/edge_kind_counts"
+        }
+      }
+    },
+    "node_kind_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "module": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "class": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "function": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "method": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "static_method": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "class_method": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "edge_kind_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "uses": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "defines": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "canonical_name", "name"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "module",
+            "class",
+            "function",
+            "method",
+            "static_method",
+            "class_method"
+          ]
+        },
+        "canonical_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "namespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "location": {
+          "$ref": "#/$defs/location"
+        }
+      }
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source", "target"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["uses", "defines"]
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "warnings",
+        "unresolved_references",
+        "ambiguous_resolutions",
+        "external_references",
+        "approximations"
+      ],
+      "properties": {
+        "summary": {
+          "$ref": "#/$defs/diagnostic_summary"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/warning"
+          }
+        },
+        "unresolved_references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/unresolved_reference"
+          }
+        },
+        "ambiguous_resolutions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ambiguous_resolution"
+          }
+        },
+        "external_references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/external_reference"
+          }
+        },
+        "approximations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/approximation"
+          }
+        }
+      }
+    },
+    "diagnostic_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "warnings",
+        "unresolved_references",
+        "ambiguous_resolutions",
+        "external_references",
+        "approximations"
+      ],
+      "properties": {
+        "warnings": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unresolved_references": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ambiguous_resolutions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "external_references": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "approximations": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "unresolved_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source", "symbol"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "symbol": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "ambiguous_resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source", "symbol", "candidate_targets"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "symbol": {
+          "type": "string",
+          "minLength": 1
+        },
+        "candidate_targets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "external_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source", "canonical_name"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonical_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "approximation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source", "reason"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "symbol": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "candidate_targets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}
