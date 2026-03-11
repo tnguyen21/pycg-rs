@@ -129,10 +129,11 @@ fn assert_corpus_healthy(
     );
 }
 
-/// Smoke test: analyze the `requests` package (~18 files).
+/// Analyze the `requests` package (~18 files).
 ///
-/// Conservative lower bounds chosen so that an empty/degenerate graph
-/// fails while leaving headroom for refactors that remove some nodes.
+/// Beyond the smoke-test thresholds, asserts structurally stable cross-module
+/// edges that would break only if the analyzer regresses on import resolution,
+/// class instantiation, or attribute access.
 #[test]
 fn test_corpus_requests() {
     let Some(dir) = corpus_dir("requests", "src/requests") else {
@@ -140,13 +141,42 @@ fn test_corpus_requests() {
         return;
     };
 
-    let (_, stats) = analyze_corpus(&dir);
+    let (cg, stats) = analyze_corpus(&dir);
 
-    // requests has 18 source files, ~9 classes, many dozens of functions
     assert_corpus_healthy("requests", &stats, 10, 5, 20, 15);
+
+    // Module-level __init__ calls internal helpers
+    assert!(
+        has_uses_edge(&cg, "requests", "check_compatibility"),
+        "requests.__init__ should call check_compatibility"
+    );
+    assert!(
+        has_uses_edge(&cg, "requests", "_check_cryptography"),
+        "requests.__init__ should call _check_cryptography"
+    );
+
+    // Cross-module: adapters uses models, auth, cookies, exceptions
+    assert!(
+        has_uses_edge(&cg, "adapters", "Response"),
+        "adapters should reference models.Response"
+    );
+    assert!(
+        has_uses_edge(&cg, "adapters", "_basic_auth_str"),
+        "adapters should call auth._basic_auth_str"
+    );
+    assert!(
+        has_uses_edge(&cg, "adapters", "extract_cookies_to_jar"),
+        "adapters should call cookies.extract_cookies_to_jar"
+    );
+
+    // Exception references from adapters
+    assert!(
+        has_uses_edge(&cg, "adapters", "ConnectionError"),
+        "adapters should reference exceptions.ConnectionError"
+    );
 }
 
-/// Smoke test: analyze the `rich` package (~78 files).
+/// Analyze the `rich` package (~78 files).
 #[test]
 fn test_corpus_rich() {
     let Some(dir) = corpus_dir("rich", "rich") else {
@@ -154,13 +184,34 @@ fn test_corpus_rich() {
         return;
     };
 
-    let (_, stats) = analyze_corpus(&dir);
+    let (cg, stats) = analyze_corpus(&dir);
 
-    // rich has 78 source files, 50+ classes, 150+ methods/functions
     assert_corpus_healthy("rich", &stats, 40, 30, 80, 60);
+
+    // __main__.make_test_card uses Console, Table, Panel, Syntax, etc.
+    assert!(
+        has_uses_edge(&cg, "__main__", "Console"),
+        "rich.__main__ should reference console.Console"
+    );
+    assert!(
+        has_uses_edge(&cg, "__main__", "Table"),
+        "rich.__main__ should reference table.Table"
+    );
+    assert!(
+        has_uses_edge(&cg, "__main__", "Panel"),
+        "rich.__main__ should reference panel.Panel"
+    );
+    assert!(
+        has_uses_edge(&cg, "__main__", "Syntax"),
+        "rich.__main__ should reference syntax.Syntax"
+    );
+    assert!(
+        has_uses_edge(&cg, "__main__", "Style"),
+        "rich.__main__ should reference style.Style"
+    );
 }
 
-/// Smoke test: analyze the `flask` package (~18 files).
+/// Analyze the `flask` package (~18 files).
 #[test]
 fn test_corpus_flask() {
     let Some(dir) = corpus_dir("flask", "src/flask") else {
@@ -168,10 +219,34 @@ fn test_corpus_flask() {
         return;
     };
 
-    let (_, stats) = analyze_corpus(&dir);
+    let (cg, stats) = analyze_corpus(&dir);
 
-    // flask has 18 source files, several classes (Flask, Blueprint, etc.)
     assert_corpus_healthy("flask", &stats, 8, 5, 20, 15);
+
+    // Flask App class uses Scaffold (its base class)
+    assert!(
+        has_uses_edge(&cg, "App", "Scaffold"),
+        "App should reference scaffold.Scaffold (base class)"
+    );
+
+    // Blueprint also inherits from Scaffold
+    assert!(
+        has_uses_edge(&cg, "Blueprint", "Scaffold"),
+        "Blueprint should reference scaffold.Scaffold (base class)"
+    );
+
+    // App.__init__ references Blueprint and calls super().__init__
+    let init_uses = get_uses(&cg, "__init__");
+    assert!(
+        init_uses.contains("Blueprint"),
+        "App.__init__ should reference Blueprint, got: {init_uses:?}"
+    );
+
+    // App.add_url_rule uses scaffold helper
+    assert!(
+        has_uses_edge(&cg, "add_url_rule", "_endpoint_from_view_func"),
+        "add_url_rule should call scaffold._endpoint_from_view_func"
+    );
 }
 
 // ===================================================================

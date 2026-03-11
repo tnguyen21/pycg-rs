@@ -257,32 +257,24 @@ fn test_text_output_valid() {
 // ===================================================================
 
 /// Issue #2: annotated assignments at module level (`a: int = 3`) must not
-/// crash the analyzer.
+/// crash the analyzer.  Beyond not crashing, verify the structure is correct.
 #[test]
 fn test_regression_annotated_assignments() {
-    let fixture = test_code_dir().join("regression_issue2.py");
-    let files = vec![fixture.to_string_lossy().to_string()];
-    let cg = CallGraph::new(&files, None)
-        .expect("issue2: annotated assignment must not crash the analyzer");
-    // The file defines annotated_fn and Container – verify we produced nodes.
+    let cg = make_fixture_graph("regression_issue2.py");
+
+    // Module defines both the function and the class
     assert!(
-        !cg.nodes_arena.is_empty(),
-        "issue2: graph should not be empty"
+        has_defines_edge(&cg, "regression_issue2", "annotated_fn"),
+        "issue2: module should define annotated_fn"
     );
-    let fn_names: Vec<_> = cg
-        .nodes_arena
-        .iter()
-        .filter(|n| {
-            matches!(
-                n.flavor,
-                pycg_rs::node::Flavor::Function | pycg_rs::node::Flavor::Method
-            )
-        })
-        .map(|n| n.name.as_str())
-        .collect();
     assert!(
-        fn_names.contains(&"annotated_fn"),
-        "issue2: annotated_fn not found, got: {fn_names:?}"
+        has_defines_edge(&cg, "regression_issue2", "Container"),
+        "issue2: module should define Container"
+    );
+    // Container defines set_value method
+    assert!(
+        has_defines_edge(&cg, "Container", "set_value"),
+        "issue2: Container should define set_value"
     );
 }
 
@@ -290,52 +282,38 @@ fn test_regression_annotated_assignments() {
 /// generator-as-iterable) must not crash the analyzer.
 #[test]
 fn test_regression_comprehensions() {
-    let fixture = test_code_dir().join("regression_issue3.py");
-    let files = vec![fixture.to_string_lossy().to_string()];
-    let cg =
-        CallGraph::new(&files, None).expect("issue3: comprehensions must not crash the analyzer");
-    let fn_names: Vec<_> = cg
-        .nodes_arena
-        .iter()
-        .filter(|n| {
-            matches!(
-                n.flavor,
-                pycg_rs::node::Flavor::Function | pycg_rs::node::Flavor::Method
-            )
-        })
-        .map(|n| n.name.as_str())
-        .collect();
-    assert!(
-        fn_names.contains(&"f"),
-        "issue3: function f not found, got: {fn_names:?}"
-    );
-    assert!(
-        fn_names.contains(&"g"),
-        "issue3: function g not found, got: {fn_names:?}"
-    );
-    assert!(
-        fn_names.contains(&"h"),
-        "issue3: function h not found, got: {fn_names:?}"
-    );
+    let cg = make_fixture_graph("regression_issue3.py");
+
+    // Module defines all five functions
+    let defs = get_defines(&cg, "regression_issue3");
+    for name in &["f", "g", "h", "set_comp", "dict_comp"] {
+        assert!(
+            defs.contains(*name),
+            "issue3: module should define {name}, got: {defs:?}"
+        );
+    }
 }
 
 /// Issue #5: files that reference external / uninstalled packages (numpy,
 /// pandas) and relative imports whose targets don't exist must not crash.
+/// The analyzer should still produce correct defines edges for local code.
 #[test]
 fn test_regression_external_deps() {
-    let fixture = test_code_dir().join("regression_issue5.py");
-    let files = vec![fixture.to_string_lossy().to_string()];
-    let cg = CallGraph::new(&files, None)
-        .expect("issue5: external-dep imports must not crash the analyzer");
-    let class_names: Vec<_> = cg
-        .nodes_arena
-        .iter()
-        .filter(|n| n.flavor == pycg_rs::node::Flavor::Class)
-        .map(|n| n.name.as_str())
-        .collect();
+    let cg = make_fixture_graph("regression_issue5.py");
+
+    // Module defines the class
     assert!(
-        class_names.contains(&"MyProcessor"),
-        "issue5: MyProcessor not found, got: {class_names:?}"
+        has_defines_edge(&cg, "regression_issue5", "MyProcessor"),
+        "issue5: module should define MyProcessor"
+    );
+    // Class defines __init__ and process methods
+    assert!(
+        has_defines_edge(&cg, "MyProcessor", "__init__"),
+        "issue5: MyProcessor should define __init__"
+    );
+    assert!(
+        has_defines_edge(&cg, "MyProcessor", "process"),
+        "issue5: MyProcessor should define process"
     );
 }
 
