@@ -1,0 +1,442 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tnguyen21.github.io/pycg-rs/schemas/pycg-symbols-in-v1.schema.json",
+  "title": "pycg-rs symbols-in query output v1",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "query_kind",
+        "status",
+        "query",
+        "symbols",
+        "diagnostics"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "1"
+        },
+        "query_kind": {
+          "type": "string",
+          "const": "symbols_in"
+        },
+        "status": {
+          "type": "string",
+          "const": "ok"
+        },
+        "query": {
+          "$ref": "#/$defs/target_query"
+        },
+        "symbols": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/symbol_ref"
+          }
+        },
+        "diagnostics": {
+          "$ref": "#/$defs/diagnostics"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "query_kind",
+        "status",
+        "query",
+        "error"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "1"
+        },
+        "query_kind": {
+          "type": "string",
+          "const": "symbols_in"
+        },
+        "status": {
+          "type": "string",
+          "const": "error"
+        },
+        "query": {
+          "$ref": "#/$defs/target_query"
+        },
+        "error": {
+          "$ref": "#/$defs/error"
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "target_query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "target_kind"
+      ],
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_kind": {
+          "type": "string",
+          "enum": [
+            "path",
+            "module"
+          ]
+        },
+        "graph_mode": {
+          "type": "string",
+          "enum": [
+            "symbol",
+            "module"
+          ]
+        }
+      }
+    },
+    "symbol_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_name",
+        "kind"
+      ],
+      "properties": {
+        "canonical_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "module",
+            "class",
+            "function",
+            "method",
+            "static_method",
+            "class_method"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "namespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "location": {
+          "$ref": "#/$defs/location"
+        }
+      }
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "diagnostic_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "warnings",
+        "unresolved_references",
+        "ambiguous_resolutions",
+        "external_references",
+        "approximations"
+      ],
+      "properties": {
+        "warnings": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unresolved_references": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ambiguous_resolutions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "external_references": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "approximations": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "unresolved_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "source",
+        "symbol"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "symbol": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "ambiguous_resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "source",
+        "symbol",
+        "candidate_targets"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "symbol": {
+          "type": "string",
+          "minLength": 1
+        },
+        "candidate_targets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "external_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "source",
+        "canonical_name"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonical_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "approximation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "source",
+        "reason"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "symbol": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "candidate_targets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "warnings",
+        "unresolved_references",
+        "ambiguous_resolutions",
+        "external_references",
+        "approximations"
+      ],
+      "properties": {
+        "summary": {
+          "$ref": "#/$defs/diagnostic_summary"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/warning"
+          }
+        },
+        "unresolved_references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/unresolved_reference"
+          }
+        },
+        "ambiguous_resolutions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ambiguous_resolution"
+          }
+        },
+        "external_references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/external_reference"
+          }
+        },
+        "approximations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/approximation"
+          }
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "symbol_not_found",
+            "target_not_found",
+            "ambiguous_query",
+            "invalid_target"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "matches": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

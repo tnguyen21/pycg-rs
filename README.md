@@ -125,6 +125,9 @@ jq '.stats' graph.json
 
 The machine-readable contract is documented in
 [`docs/json-contract.md`](docs/json-contract.md).
+Planned query-oriented CLI result shapes are sketched in
+[`docs/query-contracts.md`](docs/query-contracts.md).
+Initial query JSON Schemas live in [`docs/json-schema/`](docs/json-schema/).
 The corresponding JSON Schema lives at
 [`docs/json-schema/pycg-graph-v1.schema.json`](docs/json-schema/pycg-graph-v1.schema.json).
 
