@@ -1,4 +1,5 @@
 use crate::analyzer::{CallGraph, ExternalReferenceKind};
+use crate::intern::Interner;
 use crate::node::{Flavor, Node, NodeId};
 use serde::Serialize;
 use crate::{FxHashMap, FxHashSet};
@@ -560,9 +561,12 @@ fn public_kind(node: &Node) -> Option<&'static str> {
     }
 }
 
-fn node_name_and_namespace(node: &Node, canonical_name: &str) -> (Option<String>, Option<String>) {
-    if let Some(namespace) = node.namespace.as_ref().filter(|value| !value.is_empty()) {
-        return (Some(node.name.clone()), Some(namespace.clone()));
+fn node_name_and_namespace(node: &Node, canonical_name: &str, interner: &Interner) -> (Option<String>, Option<String>) {
+    if let Some(ns_id) = node.namespace {
+        let ns_str = interner.resolve(ns_id);
+        if !ns_str.is_empty() {
+            return (Some(interner.resolve(node.name).to_owned()), Some(ns_str.to_owned()));
+        }
     }
 
     if let Some((namespace, name)) = canonical_name.rsplit_once('.') {
@@ -572,10 +576,10 @@ fn node_name_and_namespace(node: &Node, canonical_name: &str) -> (Option<String>
     (Some(canonical_name.to_string()), None)
 }
 
-fn symbol_ref(node: &Node, formatter: &PathFormatter) -> Option<SymbolRef> {
-    let canonical_name = node.get_name();
+fn symbol_ref(node: &Node, formatter: &PathFormatter, interner: &Interner) -> Option<SymbolRef> {
+    let canonical_name = node.get_name(interner);
     let kind = public_kind(node)?.to_string();
-    let (name, namespace) = node_name_and_namespace(node, &canonical_name);
+    let (name, namespace) = node_name_and_namespace(node, &canonical_name, interner);
     Some(SymbolRef {
         canonical_name,
         kind,
@@ -597,8 +601,8 @@ fn defined_public_node_ids(cg: &CallGraph) -> Vec<NodeId> {
         .collect();
     ids.sort_by(|a, b| {
         cg.nodes_arena[*a]
-            .get_name()
-            .cmp(&cg.nodes_arena[*b].get_name())
+            .get_name(&cg.interner)
+            .cmp(&cg.nodes_arena[*b].get_name(&cg.interner))
     });
     ids
 }
@@ -607,7 +611,7 @@ fn resolve_symbol_matches(cg: &CallGraph, symbol: &str, match_mode: MatchMode) -
     let mut ids: Vec<NodeId> = defined_public_node_ids(cg)
         .into_iter()
         .filter(|id| {
-            let canonical_name = cg.nodes_arena[*id].get_name();
+            let canonical_name = cg.nodes_arena[*id].get_name(&cg.interner);
             match match_mode {
                 MatchMode::Exact => canonical_name == symbol,
                 MatchMode::Suffix => {
@@ -618,8 +622,8 @@ fn resolve_symbol_matches(cg: &CallGraph, symbol: &str, match_mode: MatchMode) -
         .collect();
     ids.sort_by(|a, b| {
         cg.nodes_arena[*a]
-            .get_name()
-            .cmp(&cg.nodes_arena[*b].get_name())
+            .get_name(&cg.interner)
+            .cmp(&cg.nodes_arena[*b].get_name(&cg.interner))
     });
     ids
 }
@@ -649,7 +653,7 @@ fn resolve_single_symbol(
             "ambiguous_query",
             format!("Query '{symbol}' matched multiple symbols"),
             many.iter()
-                .map(|id| cg.nodes_arena[*id].get_name())
+                .map(|id| cg.nodes_arena[*id].get_name(&cg.interner))
                 .collect(),
         )),
     }
@@ -704,7 +708,7 @@ fn collect_query_diagnostics(
 
     let relevant_source_names: FxHashSet<String> = relevant_source_ids
         .iter()
-        .map(|id| cg.nodes_arena[*id].get_name())
+        .map(|id| cg.nodes_arena[*id].get_name(&cg.interner))
         .collect();
 
     let mut unresolved_suppressions: FxHashSet<(String, String)> = FxHashSet::default();
@@ -748,7 +752,7 @@ fn collect_query_diagnostics(
 
     for source_id in source_ids {
         let source_node = &cg.nodes_arena[source_id];
-        let source_name = source_node.get_name();
+        let source_name = source_node.get_name(&cg.interner);
         let path = source_node
             .filename
             .as_ref()
@@ -775,17 +779,18 @@ fn collect_query_diagnostics(
         for target_id in targets {
             let target = &cg.nodes_arena[target_id];
             if target.namespace.is_none() {
-                if target.name == "__init__"
-                    || target.name.starts_with("^^^")
-                    || unresolved_suppressions.contains(&(source_name.clone(), target.name.clone()))
+                let target_name_str = cg.interner.resolve(target.name).to_owned();
+                if target_name_str == "__init__"
+                    || target_name_str.starts_with("^^^")
+                    || unresolved_suppressions.contains(&(source_name.clone(), target_name_str.clone()))
                 {
                     continue;
                 }
-                if unresolved_seen.insert(target.name.clone()) {
+                if unresolved_seen.insert(target_name_str.clone()) {
                     unresolved_references.push(UnresolvedReference {
                         kind: "use".to_string(),
                         source: source_name.clone(),
-                        symbol: target.name.clone(),
+                        symbol: target_name_str,
                         path: path.clone(),
                         line,
                     });
@@ -794,10 +799,11 @@ fn collect_query_diagnostics(
             }
 
             if cg.defined.contains(&target_id) {
+                let target_name_str = cg.interner.resolve(target.name).to_owned();
                 concrete_groups
-                    .entry(target.name.clone())
+                    .entry(target_name_str)
                     .or_default()
-                    .push(target.get_name());
+                    .push(target.get_name(&cg.interner));
             }
         }
 
@@ -887,7 +893,7 @@ fn collect_query_diagnostics(
 }
 
 pub fn symbols_in(
-    cg: &CallGraph,
+    cg: &mut CallGraph,
     target: &str,
     target_kind: TargetKind,
     graph_mode: QueryGraphMode,
@@ -904,7 +910,7 @@ pub fn symbols_in(
                         .as_ref()
                         .is_some_and(|path| path_matches_target(path, target, &formatter)),
                     TargetKind::Module => {
-                        module_matches_target(&cg.nodes_arena[*id].get_name(), target)
+                        module_matches_target(&cg.nodes_arena[*id].get_name(&cg.interner), target)
                     }
                 })
                 .collect();
@@ -922,7 +928,7 @@ pub fn symbols_in(
 
             let symbols: Vec<SymbolRef> = node_ids
                 .iter()
-                .filter_map(|id| symbol_ref(&cg.nodes_arena[*id], &formatter))
+                .filter_map(|id| symbol_ref(&cg.nodes_arena[*id], &formatter, &cg.interner))
                 .collect();
             let relevant_paths: FxHashSet<String> = symbols
                 .iter()
@@ -956,11 +962,11 @@ pub fn symbols_in(
                         .filename
                         .as_ref()
                         .is_some_and(|path| path_matches_target(path, target, &formatter)),
-                    TargetKind::Module => module_matches_target(&node.get_name(), target),
+                    TargetKind::Module => module_matches_target(&node.get_name(&cg.interner), target),
                 };
                 if matches {
                     relevant_ids.insert(id);
-                    if let Some(symbol) = symbol_ref(node, &formatter) {
+                    if let Some(symbol) = symbol_ref(node, &formatter, &cg.interner) {
                         symbols.push(symbol);
                     }
                 }
@@ -998,7 +1004,7 @@ pub fn symbols_in(
 }
 
 pub fn summary(
-    cg: &CallGraph,
+    cg: &mut CallGraph,
     target: &str,
     target_kind: TargetKind,
     graph_mode: QueryGraphMode,
@@ -1011,6 +1017,7 @@ pub fn summary(
             payload,
             diagnostics,
         })) => {
+            let cg = &*cg; // reborrow as shared after symbols_in is done
             let mut symbol_counts = BTreeMap::new();
             let mut file_count = FxHashSet::default();
             for symbol in &payload {
@@ -1033,7 +1040,7 @@ pub fn summary(
                     .flat_map(|(source, targets)| {
                         let symbol_names = symbol_names.clone();
                         targets.iter().filter(move |target| {
-                            symbol_names.contains(&cg.nodes_arena[**target].get_name())
+                            symbol_names.contains(&cg.nodes_arena[**target].get_name(&cg.interner))
                                 && cg.defined.contains(source)
                         })
                     })
@@ -1042,7 +1049,7 @@ pub fn summary(
                     .uses_edges
                     .iter()
                     .filter(|(source, _)| {
-                        symbol_names.contains(&cg.nodes_arena[**source].get_name())
+                        symbol_names.contains(&cg.nodes_arena[**source].get_name(&cg.interner))
                     })
                     .map(|(_, targets)| {
                         targets
@@ -1060,13 +1067,13 @@ pub fn summary(
                 let mut callee_counts: FxHashMap<String, usize> = FxHashMap::default();
 
                 for (source, targets) in &cg.uses_edges {
-                    let source_name = cg.nodes_arena[*source].get_name();
+                    let source_name = cg.nodes_arena[*source].get_name(&cg.interner);
                     let source_in_scope = symbol_names.contains(&source_name);
                     for target_id in targets {
                         if !cg.defined.contains(target_id) {
                             continue;
                         }
-                        let target_name = cg.nodes_arena[*target_id].get_name();
+                        let target_name = cg.nodes_arena[*target_id].get_name(&cg.interner);
                         if symbol_names.contains(&target_name) && cg.defined.contains(source) {
                             *caller_counts.entry(target_name.clone()).or_insert(0) += 1;
                         }
@@ -1133,7 +1140,7 @@ pub fn callees(
     let formatter = PathFormatter::new(render_options.analysis_root);
     match resolve_single_symbol(cg, symbol, match_mode) {
         Ok(source_id) => {
-            let node = symbol_ref(&cg.nodes_arena[source_id], &formatter)
+            let node = symbol_ref(&cg.nodes_arena[source_id], &formatter, &cg.interner)
                 .expect("resolved node should be public");
             let mut edges: Vec<OutgoingEdge> = cg
                 .uses_edges
@@ -1144,7 +1151,7 @@ pub fn callees(
                     if !cg.defined.contains(target_id) {
                         return None;
                     }
-                    symbol_ref(&cg.nodes_arena[*target_id], &formatter).map(|target| OutgoingEdge {
+                    symbol_ref(&cg.nodes_arena[*target_id], &formatter, &cg.interner).map(|target| OutgoingEdge {
                         kind: "uses".to_string(),
                         target,
                     })
@@ -1181,7 +1188,7 @@ pub fn callers(
     let formatter = PathFormatter::new(render_options.analysis_root);
     match resolve_single_symbol(cg, symbol, match_mode) {
         Ok(target_id) => {
-            let node = symbol_ref(&cg.nodes_arena[target_id], &formatter)
+            let node = symbol_ref(&cg.nodes_arena[target_id], &formatter, &cg.interner)
                 .expect("resolved node should be public");
             let mut relevant_ids = FxHashSet::default();
             let mut edges: Vec<IncomingEdge> = cg
@@ -1192,7 +1199,7 @@ pub fn callers(
                         return None;
                     }
                     relevant_ids.insert(*source_id);
-                    symbol_ref(&cg.nodes_arena[*source_id], &formatter).map(|source| IncomingEdge {
+                    symbol_ref(&cg.nodes_arena[*source_id], &formatter, &cg.interner).map(|source| IncomingEdge {
                         kind: "uses".to_string(),
                         source,
                     })
@@ -1232,7 +1239,7 @@ pub fn neighbors(
     let formatter = PathFormatter::new(render_options.analysis_root);
     match resolve_single_symbol(cg, symbol, match_mode) {
         Ok(node_id) => {
-            let node = symbol_ref(&cg.nodes_arena[node_id], &formatter)
+            let node = symbol_ref(&cg.nodes_arena[node_id], &formatter, &cg.interner)
                 .expect("resolved node should be public");
             let mut relevant_ids = FxHashSet::from_iter([node_id]);
             let mut incoming = Vec::new();
@@ -1241,7 +1248,7 @@ pub fn neighbors(
                     continue;
                 }
                 relevant_ids.insert(*source_id);
-                if let Some(source) = symbol_ref(&cg.nodes_arena[*source_id], &formatter) {
+                if let Some(source) = symbol_ref(&cg.nodes_arena[*source_id], &formatter, &cg.interner) {
                     incoming.push(IncomingEdge {
                         kind: "uses".to_string(),
                         source,
@@ -1258,7 +1265,7 @@ pub fn neighbors(
                 if !cg.defined.contains(target_id) {
                     continue;
                 }
-                if let Some(target) = symbol_ref(&cg.nodes_arena[*target_id], &formatter) {
+                if let Some(target) = symbol_ref(&cg.nodes_arena[*target_id], &formatter, &cg.interner) {
                     outgoing.push(OutgoingEdge {
                         kind: "uses".to_string(),
                         target,
@@ -1340,8 +1347,8 @@ pub fn path(
                 .collect();
             sorted_targets.sort_by(|a, b| {
                 cg.nodes_arena[*a]
-                    .get_name()
-                    .cmp(&cg.nodes_arena[*b].get_name())
+                    .get_name(&cg.interner)
+                    .cmp(&cg.nodes_arena[*b].get_name(&cg.interner))
             });
             for next in sorted_targets {
                 if visited.insert(next) {
@@ -1359,8 +1366,8 @@ pub fn path(
                 "path_not_found",
                 format!(
                     "No path connected '{}' to '{}'",
-                    cg.nodes_arena[source_id].get_name(),
-                    cg.nodes_arena[target_id].get_name()
+                    cg.nodes_arena[source_id].get_name(&cg.interner),
+                    cg.nodes_arena[target_id].get_name(&cg.interner)
                 ),
                 Vec::new(),
             ),
@@ -1377,14 +1384,14 @@ pub fn path(
 
     let nodes: Vec<SymbolRef> = node_ids
         .iter()
-        .filter_map(|id| symbol_ref(&cg.nodes_arena[*id], &formatter))
+        .filter_map(|id| symbol_ref(&cg.nodes_arena[*id], &formatter, &cg.interner))
         .collect();
     let edges: Vec<PathEdge> = node_ids
         .windows(2)
         .map(|pair| PathEdge {
             kind: "uses".to_string(),
-            source: cg.nodes_arena[pair[0]].get_name(),
-            target: cg.nodes_arena[pair[1]].get_name(),
+            source: cg.nodes_arena[pair[0]].get_name(&cg.interner),
+            target: cg.nodes_arena[pair[1]].get_name(&cg.interner),
         })
         .collect();
     let relevant_ids: FxHashSet<NodeId> = node_ids.iter().copied().collect();

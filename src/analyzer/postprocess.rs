@@ -19,31 +19,25 @@ impl super::AnalysisSession {
 
     /// For each unknown node `*.name`, replace all its incoming edges
     /// with edges to `X.name` for all possible Xs.
-    ///
-    /// Precision heuristic (INV-2): if a caller already has a *concrete*
-    /// uses edge to any node named `name`, skip wildcard expansion for that
-    /// `(caller, name)` pair.  This prevents broad false-positive fanout when
-    /// the abstract-value machinery has already produced a better resolution.
     fn expand_unknowns(&mut self) {
-        // Build index of (from_id, short_name) pairs that already have a
-        // concrete (namespaced) uses edge.  Wildcards whose (from, name) are
-        // covered by a concrete edge will be suppressed.
-        let mut concrete_uses_pairs: FxHashSet<(NodeId, String)> = FxHashSet::default();
+        // Build index of (from_id, short_name SymId) pairs that already have a
+        // concrete (namespaced) uses edge.
+        let mut concrete_uses_pairs: FxHashSet<(NodeId, super::SymId)> = FxHashSet::default();
         for (&from, targets) in &self.uses_edges {
             for &to in targets {
                 if self.nodes_arena[to].namespace.is_some() {
-                    concrete_uses_pairs.insert((from, self.nodes_arena[to].name.clone()));
+                    concrete_uses_pairs.insert((from, self.nodes_arena[to].name));
                 }
             }
         }
 
-        // Collect new defines edges (unchanged -- no precision scoping for defines).
+        // Collect new defines edges
         let mut new_defines: Vec<(NodeId, NodeId)> = Vec::new();
         for (&from, targets) in &self.defines_edges {
             for &to in targets {
                 if self.nodes_arena[to].namespace.is_none() {
-                    let name = self.nodes_arena[to].name.clone();
-                    if let Some(ids) = self.nodes_by_name.get(&name) {
+                    let name_sym = self.nodes_arena[to].name;
+                    if let Some(ids) = self.nodes_by_name.get(&name_sym) {
                         for &candidate in ids {
                             if self.nodes_arena[candidate].namespace.is_some() {
                                 new_defines.push((from, candidate));
@@ -57,41 +51,30 @@ impl super::AnalysisSession {
             self.add_defines_edge(from, Some(to));
         }
 
-        // Collect new uses edges -- skip when a concrete resolution already exists
-        // for the same (from, name) pair (precision heuristic).
+        // Collect new uses edges
         let mut new_uses: Vec<(NodeId, NodeId)> = Vec::new();
         for (&from, targets) in &self.uses_edges {
             for &to in targets {
                 if self.nodes_arena[to].namespace.is_none() {
-                    let name = self.nodes_arena[to].name.clone();
-                    // INV-3: Do not fan out private names globally.
-                    // A private name that was filtered by star-import should
-                    // remain unresolved rather than being reattached to an
-                    // unrelated module's private function with the same short
-                    // name.  Within-module private calls are already handled
-                    // by scope analysis and will appear in concrete_uses_pairs.
-                    if name.starts_with('_') {
+                    let name_sym = self.nodes_arena[to].name;
+                    let name_str = self.graph.interner.resolve(name_sym);
+                    if name_str.starts_with('_') {
                         continue;
                     }
-                    // Suppress global fanout when the caller already has a
-                    // concrete resolution for this short name.
-                    if concrete_uses_pairs.contains(&(from, name.clone())) {
+                    if concrete_uses_pairs.contains(&(from, name_sym)) {
                         continue;
                     }
-                    if let Some(ids) = self.nodes_by_name.get(&name) {
+                    if let Some(ids) = self.nodes_by_name.get(&name_sym) {
                         for &candidate in ids {
-                            if let Some(ref ns) = self.nodes_arena[candidate].namespace.clone() {
-                                // INV-1: If the candidate's module defines __all__ and
-                                // this name is not listed, skip the expansion.  Such a
-                                // name is intentionally unexported; an unresolved call
-                                // to it must not be attributed to the module's private
-                                // implementation.
-                                if !ns.is_empty()
-                                    && let Some(scope) = self.scopes.get(ns)
-                                    && let Some(ref exports) = scope.all_exports
-                                    && !exports.contains(&name)
-                                {
-                                    continue;
+                            if let Some(ns_sym) = self.nodes_arena[candidate].namespace {
+                                let ns_str = self.graph.interner.resolve(ns_sym);
+                                if !ns_str.is_empty() {
+                                    if let Some(scope) = self.scopes.get(&ns_sym)
+                                        && let Some(ref exports) = scope.all_exports
+                                        && !exports.contains(&name_sym)
+                                    {
+                                        continue;
+                                    }
                                 }
                                 new_uses.push((from, candidate));
                             }
@@ -117,17 +100,6 @@ impl super::AnalysisSession {
     }
 
     /// Resolve import edges: follow import chains to their definitions.
-    ///
-    /// Two strategies are tried in order for each remaining `ImportedItem`:
-    ///
-    /// 1. **Scope lookup** -- the ImportedItem's namespace IS the source module
-    ///    name.  If `scopes[namespace][name]` is non-empty we can remap
-    ///    directly, without needing any outgoing edge on the placeholder node.
-    ///    This handles re-export chains that were not yet resolved when
-    ///    `visit_import_from` ran.
-    ///
-    /// 2. **Uses-edge walk** -- legacy path kept for modules whose scopes are
-    ///    not available (external packages, etc.).
     fn resolve_imports(&mut self) {
         // Find all imported item nodes
         let import_nodes: Vec<NodeId> = self
@@ -146,11 +118,17 @@ impl super::AnalysisSession {
                 continue;
             }
 
-            let mod_name = self.nodes_arena[from_id]
-                .namespace
-                .clone()
-                .unwrap_or_default();
-            let item_name = self.nodes_arena[from_id].name.clone();
+            let mod_name = {
+                let ns_sym = self.nodes_arena[from_id].namespace;
+                match ns_sym {
+                    Some(s) => self.graph.interner.resolve(s).to_owned(),
+                    None => String::new(),
+                }
+            };
+            let item_name = {
+                let name_sym = self.nodes_arena[from_id].name;
+                self.graph.interner.resolve(name_sym).to_owned()
+            };
 
             // Strategy 1: scope lookup in the source module.
             let scope_vals: Vec<NodeId> = self
@@ -158,8 +136,6 @@ impl super::AnalysisSession {
                 .iter()
                 .collect();
             if !scope_vals.is_empty() {
-                // Prefer the first concrete (non-ImportedItem) candidate so
-                // that we chain through rather than stop at another placeholder.
                 let best = scope_vals
                     .iter()
                     .find(|&&id| self.nodes_arena[id].flavor != Flavor::ImportedItem)
@@ -167,7 +143,6 @@ impl super::AnalysisSession {
                     .copied();
                 if let Some(target) = best {
                     import_mapping.insert(from_id, target);
-                    // If the target is itself still an ImportedItem, chase it.
                     if self.nodes_arena[target].flavor == Flavor::ImportedItem && target != from_id
                     {
                         to_resolve.push(target);
@@ -176,7 +151,7 @@ impl super::AnalysisSession {
                 }
             }
 
-            // Strategy 2: uses-edge walk (legacy path for external modules).
+            // Strategy 2: uses-edge walk
             let to_id = if let Some(targets) = self.uses_edges.get(&from_id) {
                 if targets.len() == 1 {
                     *targets.iter().next().expect("len == 1 checked above")
@@ -188,18 +163,23 @@ impl super::AnalysisSession {
             };
 
             // Resolve namespace
-            let module_id = if self.nodes_arena[to_id].namespace.as_deref() == Some("") {
-                to_id
-            } else {
-                let ns = self.nodes_arena[to_id]
-                    .namespace
-                    .clone()
-                    .unwrap_or_default();
-                self.get_node(Some(""), &ns, Flavor::Namespace)
+            let module_id = {
+                let ns_sym = self.nodes_arena[to_id].namespace;
+                let ns_str = ns_sym
+                    .map(|s| self.graph.interner.resolve(s))
+                    .unwrap_or("");
+                if ns_str == "" && ns_sym.is_some() {
+                    to_id
+                } else {
+                    let ns_owned = ns_sym
+                        .map(|s| self.graph.interner.resolve(s).to_owned())
+                        .unwrap_or_default();
+                    self.get_node(Some(""), &ns_owned, Flavor::Namespace)
+                }
             };
 
             if let Some(module_uses) = self.uses_edges.get(&module_id).cloned() {
-                let from_name = self.nodes_arena[from_id].name.clone();
+                let from_name = self.nodes_arena[from_id].name;
                 for candidate in &module_uses {
                     if self.nodes_arena[*candidate].name == from_name {
                         import_mapping.insert(from_id, *candidate);
@@ -218,7 +198,6 @@ impl super::AnalysisSession {
         if !import_mapping.is_empty() {
             let remap = |id: NodeId| -> NodeId { *import_mapping.get(&id).unwrap_or(&id) };
 
-            // Remap uses_edges
             let old_uses: Vec<(NodeId, FxHashSet<NodeId>)> = self.uses_edges.drain().collect();
             for (from, targets) in old_uses {
                 if targets.is_empty() {
@@ -231,8 +210,8 @@ impl super::AnalysisSession {
                 }
             }
 
-            // Remap defines_edges
-            let old_defines: Vec<(NodeId, FxHashSet<NodeId>)> = self.defines_edges.drain().collect();
+            let old_defines: Vec<(NodeId, FxHashSet<NodeId>)> =
+                self.defines_edges.drain().collect();
             for (from, targets) in old_defines {
                 if targets.is_empty() {
                     continue;
@@ -244,7 +223,6 @@ impl super::AnalysisSession {
                 }
             }
 
-            // Remap nodes_by_name
             for ids in self.nodes_by_name.values_mut() {
                 for id in ids.iter_mut() {
                     if let Some(&mapped) = import_mapping.get(id) {
@@ -257,37 +235,35 @@ impl super::AnalysisSession {
 
     /// For all use edges to non-existent nodes X.name, replace with *.name.
     fn contract_nonexistents(&mut self) {
-        // First pass: collect edges that need changes (from, to, wildcard_name)
-        let mut to_contract: Vec<(NodeId, NodeId, String)> = Vec::new();
+        let mut to_contract: Vec<(NodeId, NodeId)> = Vec::new();
 
         for (&from, targets) in &self.uses_edges {
             for &to in targets {
                 if self.nodes_arena[to].namespace.is_some() && !self.defined.contains(&to) {
-                    let name = self.nodes_arena[to].name.clone();
-                    to_contract.push((from, to, name));
+                    to_contract.push((from, to));
                 }
             }
         }
 
-        // Second pass: record diagnostics, create wildcard nodes, and update edges
-        for (from, to, name) in to_contract {
+        for (from, to) in to_contract {
             let external_kind = match self.nodes_arena[to].flavor {
                 Flavor::ImportedItem => Some(super::ExternalReferenceKind::Import),
                 Flavor::Module => Some(super::ExternalReferenceKind::Module),
                 _ => None,
             };
             if let Some(kind) = external_kind {
-                self.record_external_reference(from, kind, self.nodes_arena[to].get_name());
+                let canonical = self.nodes_arena[to].get_name(&self.graph.interner);
+                self.record_external_reference(from, kind, canonical);
             }
-            let wild_id = self.get_node(None, &name, Flavor::Unknown);
+            let name_str = self.graph.interner.resolve(self.nodes_arena[to].name).to_owned();
+            let wild_id = self.get_node(None, &name_str, Flavor::Unknown);
             self.defined.remove(&wild_id);
             self.add_uses_edge(from, wild_id);
             self.remove_uses_edge(from, to);
         }
     }
 
-    /// Remove inherited edges: if W->X.name and W->Y.name where Y inherits
-    /// from X, remove the edge to X.name.
+    /// Remove inherited edges.
     fn cull_inherited(&mut self) {
         let mut removed: Vec<(NodeId, NodeId)> = Vec::new();
 
@@ -304,10 +280,10 @@ impl super::AnalysisSession {
                     if other == to {
                         continue;
                     }
-                    let to_name = &self.nodes_arena[to].name;
-                    let other_name = &self.nodes_arena[other].name;
-                    let to_ns = &self.nodes_arena[to].namespace;
-                    let other_ns = &self.nodes_arena[other].namespace;
+                    let to_name = self.nodes_arena[to].name;
+                    let other_name = self.nodes_arena[other].name;
+                    let to_ns = self.nodes_arena[to].namespace;
+                    let other_ns = self.nodes_arena[other].namespace;
 
                     if to_name == other_name
                         && to_ns.is_some()
@@ -340,18 +316,17 @@ impl super::AnalysisSession {
         let inner_labels = ["lambda", "listcomp", "setcomp", "dictcomp", "genexpr"];
 
         for label in &inner_labels {
-            if let Some(ids) = self.nodes_by_name.get(*label).cloned() {
+            let label_sym = self.graph.interner.intern(label);
+            if let Some(ids) = self.nodes_by_name.get(&label_sym).cloned() {
                 for id in ids {
                     let parent_id = self.get_parent_node(id);
 
-                    // Move uses edges from inner to parent
                     if let Some(inner_uses) = self.uses_edges.get(&id).cloned() {
                         for target in inner_uses {
                             self.add_uses_edge(parent_id, target);
                         }
                     }
 
-                    // Mark as not defined
                     self.defined.remove(&id);
                 }
             }
@@ -360,47 +335,41 @@ impl super::AnalysisSession {
 }
 
 impl super::CallGraph {
-    // ------------------------------------------------------------------
-    // Module-level dependency graph
-    // ------------------------------------------------------------------
-
-    /// Derive a module-level dependency graph by collapsing all cross-module
-    /// uses edges.
-    ///
-    /// For each uses edge `src -> tgt`, both nodes are mapped back to their
-    /// owning module (via filename for analyzed code, via node name for
-    /// external `Flavor::Module` targets).  If they differ, a module-level
-    /// edge is emitted.  Deduplication at the module level keeps the graph
-    /// clean.
-    ///
-    /// Returns `(nodes_arena, uses_edges, defined)` suitable for passing
-    /// directly to `VisualGraph::from_call_graph`.
+    /// Derive a module-level dependency graph.
     pub fn derive_module_graph(
-        &self,
+        &mut self,
     ) -> (Vec<Node>, FxHashMap<NodeId, FxHashSet<NodeId>>, FxHashSet<NodeId>) {
-        // Reverse mapping: filename -> module name (for analyzed files).
-        let filename_to_module: FxHashMap<&str, &str> = self
+        // Build filename -> module name mapping, owning the strings to avoid
+        // borrowing interner across the entire function.
+        let filename_to_module: FxHashMap<String, String> = self
             .module_to_filename
             .iter()
-            .map(|(m, f)| (f.as_str(), m.as_str()))
+            .map(|(&m, f)| (f.clone(), self.interner.resolve(m).to_owned()))
             .collect();
 
-        // Collect module nodes and assign new compact IDs.
         let mut module_ids: FxHashMap<String, NodeId> = FxHashMap::default();
         let mut new_nodes: Vec<Node> = Vec::new();
 
-        let mut ensure_module = |name: &str, nodes: &mut Vec<Node>| -> NodeId {
-            if let Some(&id) = module_ids.get(name) {
-                return id;
-            }
-            let id = nodes.len();
-            nodes.push(Node::new(Some(""), name, Flavor::Module));
-            module_ids.insert(name.to_string(), id);
-            id
-        };
+        let mut ensure_module =
+            |name: &str, nodes: &mut Vec<Node>, interner: &mut super::Interner| -> NodeId {
+                if let Some(&id) = module_ids.get(name) {
+                    return id;
+                }
+                let id = nodes.len();
+                let ns_sym = interner.intern("");
+                let name_sym = interner.intern(name);
+                nodes.push(Node::new(Some(ns_sym), name_sym, Flavor::Module));
+                module_ids.insert(name.to_string(), id);
+                id
+            };
 
-        for (mod_name, filename) in &self.module_to_filename {
-            let id = ensure_module(mod_name, &mut new_nodes);
+        let mod_entries: Vec<(String, String)> = self
+            .module_to_filename
+            .iter()
+            .map(|(&m, f)| (self.interner.resolve(m).to_owned(), f.clone()))
+            .collect();
+        for (mod_name, filename) in &mod_entries {
+            let id = ensure_module(mod_name, &mut new_nodes, &mut self.interner);
             new_nodes[id].filename = Some(filename.clone());
         }
 
@@ -409,7 +378,7 @@ impl super::CallGraph {
         for (&src, targets) in &self.uses_edges {
             let src_node = &self.nodes_arena[src];
             let src_mod = match src_node.filename.as_deref() {
-                Some(f) => filename_to_module.get(f).copied(),
+                Some(f) => filename_to_module.get(f).map(|s| s.as_str()),
                 None => None,
             };
             let Some(src_mod) = src_mod else { continue };
@@ -418,7 +387,7 @@ impl super::CallGraph {
                 let tgt_node = &self.nodes_arena[tgt];
 
                 let tgt_mod: Option<String> = if tgt_node.flavor == Flavor::Module {
-                    Some(tgt_node.get_name())
+                    Some(tgt_node.get_name(&self.interner))
                 } else {
                     tgt_node
                         .filename
@@ -432,8 +401,8 @@ impl super::CallGraph {
                     continue;
                 }
 
-                let src_mid = ensure_module(src_mod, &mut new_nodes);
-                let tgt_mid = ensure_module(&tgt_mod, &mut new_nodes);
+                let src_mid = ensure_module(src_mod, &mut new_nodes, &mut self.interner);
+                let tgt_mid = ensure_module(&tgt_mod, &mut new_nodes, &mut self.interner);
                 module_edges.entry(src_mid).or_default().insert(tgt_mid);
             }
         }
@@ -480,13 +449,11 @@ mod tests {
         let imported = session.get_node(Some("lib"), "item", Flavor::ImportedItem);
         let concrete = session.get_node(Some("lib.impl"), "item", Flavor::Function);
 
-        let mut scope = ScopeInfo::new("lib");
-        scope
-            .defs
-            .entry("item".to_string())
-            .or_default()
-            .insert(concrete);
-        session.scopes.insert("lib".to_string(), scope);
+        let lib_sym = session.graph.interner.intern("lib");
+        let item_sym = session.graph.interner.intern("item");
+        let mut scope = ScopeInfo::new();
+        scope.defs.entry(item_sym).or_default().insert(concrete);
+        session.scopes.insert(lib_sym, scope);
         session.add_uses_edge(caller, imported);
 
         session.resolve_imports();

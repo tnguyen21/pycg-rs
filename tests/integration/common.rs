@@ -6,6 +6,8 @@ pub use std::collections::HashSet;
 pub use std::path::PathBuf;
 
 pub use pycg_rs::analyzer::CallGraph;
+#[allow(unused_imports)]
+pub use pycg_rs::intern::Interner;
 pub use pycg_rs::visgraph::{VisualGraph, VisualOptions};
 pub use pycg_rs::writer;
 
@@ -39,11 +41,15 @@ pub(crate) fn make_call_graph(dir: &std::path::Path) -> CallGraph {
 
 /// Find all nodes with the given short name, or whose fully qualified name ends with the given name.
 pub(crate) fn find_nodes_by_name(cg: &CallGraph, name: &str) -> Vec<usize> {
-    let mut result: Vec<usize> = cg.nodes_by_name.get(name).cloned().unwrap_or_default();
+    let mut result: Vec<usize> = cg
+        .interner
+        .lookup(name)
+        .and_then(|sym| cg.nodes_by_name.get(&sym))
+        .cloned()
+        .unwrap_or_default();
     for (idx, node) in cg.nodes_arena.iter().enumerate() {
-        if (node.get_name() == name || node.get_name().ends_with(&format!(".{name}")))
-            && !result.contains(&idx)
-        {
+        let full = node.get_name(&cg.interner);
+        if (full == name || full.ends_with(&format!(".{name}"))) && !result.contains(&idx) {
             result.push(idx);
         }
     }
@@ -56,7 +62,7 @@ pub(crate) fn get_defines(cg: &CallGraph, source_name: &str) -> HashSet<String> 
     for &nid in find_nodes_by_name(cg, source_name).iter() {
         if let Some(targets) = cg.defines_edges.get(&nid) {
             for &tid in targets {
-                result.insert(cg.nodes_arena[tid].name.clone());
+                result.insert(cg.interner.resolve(cg.nodes_arena[tid].name).to_owned());
             }
         }
     }
@@ -69,7 +75,7 @@ pub(crate) fn get_uses(cg: &CallGraph, source_name: &str) -> HashSet<String> {
     for &nid in find_nodes_by_name(cg, source_name).iter() {
         if let Some(targets) = cg.uses_edges.get(&nid) {
             for &tid in targets {
-                result.insert(cg.nodes_arena[tid].name.clone());
+                result.insert(cg.interner.resolve(cg.nodes_arena[tid].name).to_owned());
             }
         }
     }
@@ -82,7 +88,7 @@ pub(crate) fn get_full_uses(cg: &CallGraph, source_name: &str) -> HashSet<String
     for &nid in find_nodes_by_name(cg, source_name).iter() {
         if let Some(targets) = cg.uses_edges.get(&nid) {
             for &tid in targets {
-                result.insert(cg.nodes_arena[tid].get_name());
+                result.insert(cg.nodes_arena[tid].get_name(&cg.interner));
             }
         }
     }
@@ -94,7 +100,7 @@ pub(crate) fn has_defines_edge(cg: &CallGraph, from_name: &str, to_name: &str) -
     for &fid in find_nodes_by_name(cg, from_name).iter() {
         if let Some(targets) = cg.defines_edges.get(&fid) {
             for &tid in targets {
-                if cg.nodes_arena[tid].name == to_name {
+                if cg.interner.resolve(cg.nodes_arena[tid].name) == to_name {
                     return true;
                 }
             }
@@ -108,7 +114,7 @@ pub(crate) fn has_uses_edge(cg: &CallGraph, from_name: &str, to_name: &str) -> b
     for &fid in find_nodes_by_name(cg, from_name).iter() {
         if let Some(targets) = cg.uses_edges.get(&fid) {
             for &tid in targets {
-                if cg.nodes_arena[tid].name == to_name {
+                if cg.interner.resolve(cg.nodes_arena[tid].name) == to_name {
                     return true;
                 }
             }
@@ -124,13 +130,13 @@ pub(crate) fn has_uses_edge_full(cg: &CallGraph, from_fqn: &str, to_fqn: &str) -
         .nodes_arena
         .iter()
         .enumerate()
-        .filter_map(|(idx, node)| (node.get_name() == from_fqn).then_some(idx))
+        .filter_map(|(idx, node)| (node.get_name(&cg.interner) == from_fqn).then_some(idx))
         .collect();
     let to_ids: Vec<usize> = cg
         .nodes_arena
         .iter()
         .enumerate()
-        .filter_map(|(idx, node)| (node.get_name() == to_fqn).then_some(idx))
+        .filter_map(|(idx, node)| (node.get_name(&cg.interner) == to_fqn).then_some(idx))
         .collect();
 
     for fid in from_ids {
@@ -202,7 +208,8 @@ pub(crate) fn has_concrete_uses_edge_for_name(
     for &fid in find_nodes_by_name(cg, from_name).iter() {
         if let Some(targets) = cg.uses_edges.get(&fid) {
             for &tid in targets {
-                if cg.nodes_arena[tid].name == short_name && cg.nodes_arena[tid].namespace.is_some()
+                if cg.interner.resolve(cg.nodes_arena[tid].name) == short_name
+                    && cg.nodes_arena[tid].namespace.is_some()
                 {
                     return true;
                 }
@@ -217,14 +224,14 @@ pub(crate) fn has_concrete_uses_edge_full(cg: &CallGraph, from_fqn: &str, to_fqn
         .nodes_arena
         .iter()
         .enumerate()
-        .filter_map(|(idx, node)| (node.get_name() == from_fqn).then_some(idx))
+        .filter_map(|(idx, node)| (node.get_name(&cg.interner) == from_fqn).then_some(idx))
         .collect();
     let to_ids: Vec<usize> = cg
         .nodes_arena
         .iter()
         .enumerate()
         .filter_map(|(idx, node)| {
-            (node.get_name() == to_fqn && node.namespace.is_some()).then_some(idx)
+            (node.get_name(&cg.interner) == to_fqn && node.namespace.is_some()).then_some(idx)
         })
         .collect();
 

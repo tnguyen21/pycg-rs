@@ -9,7 +9,7 @@ impl AnalysisSession {
     ) {
         let source = &self.nodes_arena[source_id];
         let diagnostic = ExternalReferenceDiagnostic {
-            source_canonical_name: source.get_name(),
+            source_canonical_name: source.get_name(&self.graph.interner),
             source_filename: source.filename.clone(),
             source_line: source.line,
             kind,
@@ -31,7 +31,12 @@ impl AnalysisSession {
         name: &str,
         flavor: Flavor,
     ) -> NodeId {
-        let key = NodeKey::new(namespace, name);
+        let ns_sym = namespace.map(|s| self.graph.interner.intern(s));
+        let name_sym = self.graph.interner.intern(name);
+        let key = NodeKey {
+            namespace: ns_sym,
+            name: name_sym,
+        };
         if let Some(&id) = self.node_ids_by_key.get(&key) {
             let n = &self.nodes_arena[id];
             if flavor.specificity() > n.flavor.specificity() {
@@ -41,7 +46,8 @@ impl AnalysisSession {
         }
 
         let filename = if let Some(ns) = namespace {
-            if let Some(f) = self.module_to_filename.get(ns) {
+            let ns_sym = self.graph.interner.intern(ns);
+            if let Some(f) = self.module_to_filename.get(&ns_sym) {
                 Some(f.clone())
             } else {
                 Some(self.filename.clone())
@@ -50,47 +56,51 @@ impl AnalysisSession {
             Some(self.filename.clone())
         };
 
-        let mut node = Node::new(namespace, name, flavor);
+        let mut node = Node::new(ns_sym, name_sym, flavor);
         node.filename = filename;
         let id = self.nodes_arena.len();
-        if namespace.is_none() {
+        if ns_sym.is_none() {
             self.defined.insert(id);
         }
 
         self.nodes_arena.push(node);
         self.node_ids_by_key.insert(key, id);
-        self.nodes_by_name
-            .entry(name.to_string())
-            .or_default()
-            .push(id);
+        self.nodes_by_name.entry(name_sym).or_default().push(id);
         id
     }
 
     pub(super) fn get_node_of_current_namespace(&mut self) -> NodeId {
         assert!(!self.name_stack.is_empty());
         let namespace = if self.name_stack.len() > 1 {
-            self.name_stack[..self.name_stack.len() - 1].join(".")
+            let parts: Vec<&str> = self.name_stack[..self.name_stack.len() - 1]
+                .iter()
+                .map(|&id| self.graph.interner.resolve(id))
+                .collect();
+            parts.join(".")
         } else {
             String::new()
         };
-        let name = self
-            .name_stack
-            .last()
-            .expect("name_stack must not be empty during AST walk")
-            .clone();
+        let name = {
+            let name_sym = *self
+                .name_stack
+                .last()
+                .expect("name_stack must not be empty during AST walk");
+            self.graph.interner.resolve(name_sym).to_owned()
+        };
         self.get_node(Some(&namespace), &name, Flavor::Namespace)
     }
 
     pub(super) fn get_parent_node(&mut self, node_id: NodeId) -> NodeId {
         let node = &self.nodes_arena[node_id];
-        let (ns, name) = if let Some(ref namespace) = node.namespace {
-            if namespace.contains('.') {
-                let (parent_ns, parent_name) = namespace
+        let (ns, name) = if let Some(ns_sym) = node.namespace {
+            let ns_str = self.graph.interner.resolve(ns_sym).to_owned();
+            if ns_str.contains('.') {
+                let (parent_ns, parent_name) = ns_str
                     .rsplit_once('.')
                     .expect("namespace contains '.' (checked above)");
                 (parent_ns.to_string(), parent_name.to_string())
             } else {
-                (String::new(), namespace.clone())
+                (String::new(), ns_str)
             }
         } else {
             (String::new(), String::new())
@@ -126,10 +136,10 @@ impl AnalysisSession {
     pub(super) fn add_uses_edge(&mut self, from_id: NodeId, to_id: NodeId) -> bool {
         let entry = self.uses_edges.entry(from_id).or_default();
         if entry.insert(to_id) {
-            let to_ns = self.nodes_arena[to_id].namespace.clone();
-            let to_name = self.nodes_arena[to_id].name.clone();
+            let to_name = self.nodes_arena[to_id].name;
+            let to_ns = self.nodes_arena[to_id].namespace;
             if to_ns.is_some() {
-                self.remove_wild(from_id, to_id, &to_name);
+                self.remove_wild(from_id, to_id, to_name);
             }
             true
         } else {
@@ -143,16 +153,17 @@ impl AnalysisSession {
         }
     }
 
-    pub(super) fn remove_wild(&mut self, from_id: NodeId, to_id: NodeId, name: &str) {
-        if name.is_empty() {
+    pub(super) fn remove_wild(&mut self, from_id: NodeId, to_id: NodeId, name_sym: SymId) {
+        let name_str = self.graph.interner.resolve(name_sym);
+        if name_str.is_empty() {
             return;
         }
         let Some(edges) = self.uses_edges.get(&from_id) else {
             return;
         };
 
-        let to_name = &self.nodes_arena[to_id].get_name();
-        if to_name.contains("^^^argument^^^") || to_id == from_id {
+        let to_name_str = self.nodes_arena[to_id].get_name(&self.graph.interner);
+        if to_name_str.contains("^^^argument^^^") || to_id == from_id {
             return;
         }
 
@@ -160,16 +171,16 @@ impl AnalysisSession {
             .iter()
             .find(|&&eid| {
                 let n = &self.nodes_arena[eid];
-                n.namespace.is_none() && n.name == name
+                n.namespace.is_none() && n.name == name_sym
             })
             .copied();
 
         if let Some(wild_id) = wild {
             info!(
                 "Use from {} to {} resolves {}; removing wildcard",
-                self.nodes_arena[from_id].get_name(),
-                self.nodes_arena[to_id].get_name(),
-                self.nodes_arena[wild_id].get_name()
+                self.nodes_arena[from_id].get_name(&self.graph.interner),
+                self.nodes_arena[to_id].get_name(&self.graph.interner),
+                self.nodes_arena[wild_id].get_name(&self.graph.interner)
             );
             self.remove_uses_edge(from_id, wild_id);
         }
@@ -180,9 +191,12 @@ impl AnalysisSession {
     }
 
     pub(super) fn get_values(&self, name: &str) -> ValueSet {
+        let Some(name_sym) = self.graph.interner.lookup(name) else {
+            return ValueSet::empty();
+        };
         for scope_key in self.scope_stack.iter().rev() {
             if let Some(scope) = self.scopes.get(scope_key)
-                && let Some(vs) = scope.defs.get(name)
+                && let Some(vs) = scope.defs.get(&name_sym)
             {
                 return vs.clone();
             }
@@ -191,9 +205,12 @@ impl AnalysisSession {
     }
 
     pub(super) fn get_containers(&self, name: &str) -> ContainerFacts {
+        let Some(name_sym) = self.graph.interner.lookup(name) else {
+            return ContainerFacts::default();
+        };
         for scope_key in self.scope_stack.iter().rev() {
             if let Some(scope) = self.scopes.get(scope_key)
-                && let Some(facts) = scope.containers.get(name)
+                && let Some(facts) = scope.containers.get(&name_sym)
             {
                 return facts.clone();
             }
@@ -202,28 +219,36 @@ impl AnalysisSession {
     }
 
     pub(super) fn set_value(&mut self, name: &str, value: Option<NodeId>) {
-        for scope_key in self.scope_stack.iter().rev() {
-            if let Some(scope) = self.scopes.get(scope_key)
-                && scope.defs.contains_key(name)
-            {
-                let scope = self
-                    .scopes
-                    .get_mut(scope_key)
-                    .expect("scope confirmed to exist above");
-                if let Some(id) = value {
-                    scope.defs.entry(name.to_string()).or_default().insert(id);
-                }
-                return;
+        let name_sym = self.graph.interner.intern(name);
+        // First pass: find existing scope with this name
+        let found_scope_key = self
+            .scope_stack
+            .iter()
+            .rev()
+            .find(|scope_key| {
+                self.scopes
+                    .get(*scope_key)
+                    .is_some_and(|scope| scope.defs.contains_key(&name_sym))
+            })
+            .copied();
+
+        if let Some(scope_key) = found_scope_key {
+            let scope = self
+                .scopes
+                .get_mut(&scope_key)
+                .expect("scope confirmed to exist above");
+            if let Some(id) = value {
+                scope.defs.entry(name_sym).or_default().insert(id);
             }
+            return;
         }
 
-        if let Some(scope_key) = self.scope_stack.last() {
-            let scope_key = scope_key.clone();
+        if let Some(&scope_key) = self.scope_stack.last() {
             if let Some(scope) = self.scopes.get_mut(&scope_key) {
                 if let Some(id) = value {
-                    scope.defs.entry(name.to_string()).or_default().insert(id);
+                    scope.defs.entry(name_sym).or_default().insert(id);
                 } else {
-                    scope.defs.entry(name.to_string()).or_default();
+                    scope.defs.entry(name_sym).or_default();
                 }
             }
         }
@@ -234,29 +259,36 @@ impl AnalysisSession {
             return;
         }
 
-        for scope_key in self.scope_stack.iter().rev() {
-            if let Some(scope) = self.scopes.get(scope_key)
-                && scope.defs.contains_key(name)
-            {
-                let scope = self
-                    .scopes
-                    .get_mut(scope_key)
-                    .expect("scope confirmed to exist above");
-                scope
-                    .containers
-                    .entry(name.to_string())
-                    .or_default()
-                    .union_with(containers);
-                return;
-            }
+        let name_sym = self.graph.interner.intern(name);
+        let found_scope_key = self
+            .scope_stack
+            .iter()
+            .rev()
+            .find(|scope_key| {
+                self.scopes
+                    .get(*scope_key)
+                    .is_some_and(|scope| scope.defs.contains_key(&name_sym))
+            })
+            .copied();
+
+        if let Some(scope_key) = found_scope_key {
+            let scope = self
+                .scopes
+                .get_mut(&scope_key)
+                .expect("scope confirmed to exist above");
+            scope
+                .containers
+                .entry(name_sym)
+                .or_default()
+                .union_with(containers);
+            return;
         }
 
-        if let Some(scope_key) = self.scope_stack.last() {
-            let scope_key = scope_key.clone();
+        if let Some(&scope_key) = self.scope_stack.last() {
             if let Some(scope) = self.scopes.get_mut(&scope_key) {
                 scope
                     .containers
-                    .entry(name.to_string())
+                    .entry(name_sym)
                     .or_default()
                     .union_with(containers);
             }
@@ -264,10 +296,13 @@ impl AnalysisSession {
     }
 
     pub(super) fn is_local(&self, name: &str) -> bool {
-        if let Some(scope_key) = self.scope_stack.last()
-            && let Some(scope) = self.scopes.get(scope_key)
+        let Some(name_sym) = self.graph.interner.lookup(name) else {
+            return false;
+        };
+        if let Some(&scope_key) = self.scope_stack.last()
+            && let Some(scope) = self.scopes.get(&scope_key)
         {
-            return scope.locals.contains(name);
+            return scope.locals.contains(&name_sym);
         }
         false
     }

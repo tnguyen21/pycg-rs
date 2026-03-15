@@ -1,4 +1,5 @@
 pub mod analyzer;
+pub mod intern;
 pub mod node;
 pub mod query;
 pub mod scope;

@@ -328,7 +328,8 @@ fn test_postprocess_resolve_imports() {
         .nodes_arena
         .iter()
         .filter(|node| {
-            node.name == "reexport_func" && node.flavor == pycg_rs::node::Flavor::ImportedItem
+            cg.interner.resolve(node.name) == "reexport_func"
+                && node.flavor == pycg_rs::node::Flavor::ImportedItem
         })
         .count();
     assert_eq!(

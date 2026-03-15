@@ -11,14 +11,19 @@ impl CallGraph {
 
 impl AnalysisSession {
     pub(super) fn new(filenames: &[String], root: Option<&str>) -> Self {
+        let mut interner = Interner::new();
         let mut module_to_filename = FxHashMap::default();
         for filename in filenames {
             let mod_name = get_module_name(filename, root);
-            module_to_filename.insert(mod_name, filename.clone());
+            let mod_sym = interner.intern(&mod_name);
+            module_to_filename.insert(mod_sym, filename.clone());
         }
+
+        let empty_sym = interner.intern("");
 
         Self {
             graph: CallGraph {
+                interner,
                 nodes_arena: Vec::new(),
                 nodes_by_name: FxHashMap::default(),
                 defines_edges: FxHashMap::default(),
@@ -36,7 +41,7 @@ impl AnalysisSession {
             mro: FxHashMap::default(),
             filenames: filenames.to_vec(),
             root: root.map(|s| s.to_string()),
-            module_name: String::new(),
+            module_name: empty_sym,
             filename: String::new(),
             name_stack: Vec::new(),
             scope_stack: Vec::new(),
@@ -94,12 +99,13 @@ impl AnalysisSession {
         Ok(())
     }
 
-    fn prepare_files(&self) -> Result<Vec<CachedFile>> {
+    fn prepare_files(&mut self) -> Result<Vec<CachedFile>> {
         let mut cached_files = Vec::with_capacity(self.filenames.len());
-        for filename in &self.filenames {
+        for filename in &self.filenames.clone() {
             let content =
                 std::fs::read_to_string(filename).with_context(|| format!("reading {filename}"))?;
-            let module_name = get_module_name(filename, self.root.as_deref());
+            let module_name_str = get_module_name(filename, self.root.as_deref());
+            let module_name = self.graph.interner.intern(&module_name_str);
             let parsed =
                 ruff_python_parser::parse_unchecked(&content, ParseOptions::from(Mode::Module));
             let module = match parsed.into_syntax() {
@@ -107,7 +113,7 @@ impl AnalysisSession {
                 _ => continue,
             };
             let line_index = LineIndex::from_source_text(&content);
-            let scopes = Self::build_scopes(&module, &module_name);
+            let scopes = Self::build_scopes(&module, &module_name_str, &mut self.graph.interner);
             cached_files.push(CachedFile {
                 filename: filename.clone(),
                 module_name,
@@ -122,11 +128,11 @@ impl AnalysisSession {
     /// Analyze a single Python source file.
     fn process_one(&mut self, cached_file: &CachedFile) {
         self.filename = cached_file.filename.clone();
-        self.module_name = cached_file.module_name.clone();
+        self.module_name = cached_file.module_name;
 
         self.visit_module(&cached_file.module, &cached_file.line_index);
 
-        self.module_name.clear();
+        self.module_name = self.graph.interner.intern("");
         self.filename.clear();
     }
 }
