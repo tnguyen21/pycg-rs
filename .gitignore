@@ -27,3 +27,7 @@
 # Generated SVGs
 *.svg
 benchmarks/bin/
+
+# Profiling artifacts
+*.json.gz
+/benches/

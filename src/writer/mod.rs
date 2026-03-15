@@ -4,6 +4,7 @@
 //! TGF (Trivial Graph Format), plain text, and JSON.
 
 use crate::analyzer::AnalysisDiagnostics;
+use crate::intern::Interner;
 use crate::node::{Node, NodeId};
 use crate::visgraph::{VisualGraph, VisualNode};
 use serde::Serialize;
@@ -422,9 +423,12 @@ fn public_kind(node: &Node) -> Option<String> {
     }
 }
 
-fn node_name_and_namespace(node: &Node, canonical_name: &str) -> (String, Option<String>) {
-    if let Some(namespace) = node.namespace.as_ref().filter(|value| !value.is_empty()) {
-        return (node.name.clone(), Some(namespace.clone()));
+fn node_name_and_namespace(node: &Node, canonical_name: &str, interner: &Interner) -> (String, Option<String>) {
+    if let Some(ns_id) = node.namespace {
+        let ns_str = interner.resolve(ns_id);
+        if !ns_str.is_empty() {
+            return (interner.resolve(node.name).to_owned(), Some(ns_str.to_owned()));
+        }
     }
 
     if let Some((namespace, name)) = canonical_name.rsplit_once('.') {
@@ -454,6 +458,7 @@ fn build_json_diagnostics(
     analyzer_diagnostics: &AnalysisDiagnostics,
     graph_mode: &JsonGraphMode,
     path_formatter: &PathFormatter,
+    interner: &Interner,
 ) -> JsonDiagnostics {
     let mut warnings: Vec<JsonWarning> = Vec::new();
     let mut unresolved_references: Vec<JsonUnresolvedReference> = Vec::new();
@@ -465,7 +470,7 @@ fn build_json_diagnostics(
 
     let canonical_name_to_output_id: FxHashMap<String, String> = node_ids
         .iter()
-        .map(|(node_id, output_id)| (nodes_arena[*node_id].get_name(), output_id.clone()))
+        .map(|(node_id, output_id)| (nodes_arena[*node_id].get_name(interner).to_string(), output_id.clone()))
         .collect();
     let path_to_output_id: FxHashMap<String, String> = node_ids
         .iter()
@@ -534,9 +539,13 @@ fn build_json_diagnostics(
         targets.sort_unstable_by(|a, b| {
             let left = &nodes_arena[*a];
             let right = &nodes_arena[*b];
-            (&left.namespace, &left.name, left.flavor.specificity()).cmp(&(
-                &right.namespace,
-                &right.name,
+            let left_ns = left.namespace.map(|id| interner.resolve(id));
+            let right_ns = right.namespace.map(|id| interner.resolve(id));
+            let left_name = interner.resolve(left.name);
+            let right_name = interner.resolve(right.name);
+            (left_ns, left_name, left.flavor.specificity()).cmp(&(
+                right_ns,
+                right_name,
                 right.flavor.specificity(),
             ))
         });
@@ -550,18 +559,19 @@ fn build_json_diagnostics(
                 // unresolved `__init__` edge when a class has no explicit
                 // initializer. That is implementation noise, not a useful
                 // refactor diagnostic.
-                if node.name == "__init__"
-                    || node.name.starts_with("^^^")
-                    || unresolved_suppressions.contains(&(source_id.clone(), node.name.clone()))
+                let name_str = interner.resolve(node.name);
+                if name_str == "__init__"
+                    || name_str.starts_with("^^^")
+                    || unresolved_suppressions.contains(&(source_id.clone(), name_str.to_owned()))
                 {
                     continue;
                 }
-                let key = (source, node.name.clone());
+                let key = (source, name_str.to_owned());
                 if unresolved_seen.insert(key) {
                     unresolved_references.push(JsonUnresolvedReference {
                         kind: "use".to_string(),
                         source: source_id.clone(),
-                        symbol: node.name.clone(),
+                        symbol: name_str.to_owned(),
                         path: path.clone(),
                         line,
                     });
@@ -570,7 +580,7 @@ fn build_json_diagnostics(
             }
 
             concrete_groups
-                .entry(node.name.clone())
+                .entry(interner.resolve(node.name).to_owned())
                 .or_default()
                 .push(target);
         }
@@ -679,6 +689,7 @@ pub fn write_json(
     uses_edges: &FxHashMap<NodeId, FxHashSet<NodeId>>,
     analyzer_diagnostics: &AnalysisDiagnostics,
     options: &JsonOutputOptions<'_>,
+    interner: &Interner,
 ) -> String {
     let path_formatter = PathFormatter::new(options.analysis_root, options.inputs);
     let mut nodes = Vec::new();
@@ -686,7 +697,11 @@ pub fn write_json(
     sorted_ids.sort_by(|&a, &b| {
         let na = &nodes_arena[a];
         let nb = &nodes_arena[b];
-        (&na.namespace, &na.name).cmp(&(&nb.namespace, &nb.name))
+        let na_ns = na.namespace.map(|id| interner.resolve(id));
+        let nb_ns = nb.namespace.map(|id| interner.resolve(id));
+        let na_name = interner.resolve(na.name);
+        let nb_name = interner.resolve(nb.name);
+        (na_ns, na_name).cmp(&(nb_ns, nb_name))
     });
 
     let mut files: FxHashSet<&str> = FxHashSet::default();
@@ -699,8 +714,8 @@ pub fn write_json(
 
     for &id in &sorted_ids {
         let n = &nodes_arena[id];
-        let canonical_name = n.get_name();
-        let (name, namespace) = node_name_and_namespace(n, &canonical_name);
+        let canonical_name = n.get_name(interner).to_string();
+        let (name, namespace) = node_name_and_namespace(n, &canonical_name, interner);
         if let Some(ref f) = n.filename {
             files.insert(f.as_str());
         }
@@ -782,6 +797,7 @@ pub fn write_json(
         analyzer_diagnostics,
         &options.graph_mode,
         &path_formatter,
+        interner,
     );
 
     let graph = JsonGraph {
@@ -826,15 +842,26 @@ pub fn write_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::intern::Interner;
     use crate::node::{Flavor, Node};
     use crate::visgraph::VisualOptions;
     use crate::{FxHashMap, FxHashSet};
 
     fn make_test_graph() -> VisualGraph {
+        let mut interner = Interner::new();
+        let pkg = interner.intern("pkg");
+        let other = interner.intern("other");
+        let foo = interner.intern("Foo");
+        let bar = interner.intern("bar");
+        let baz = interner.intern("baz");
+        let fqn_foo = interner.intern("pkg.Foo");
+        let fqn_bar = interner.intern("pkg.bar");
+        let fqn_baz = interner.intern("other.baz");
+
         let nodes_arena = vec![
-            Node::new(Some("pkg"), "Foo", Flavor::Class).with_location("pkg.py", 1),
-            Node::new(Some("pkg"), "bar", Flavor::Function).with_location("pkg.py", 10),
-            Node::new(Some("other"), "baz", Flavor::Function).with_location("other.py", 5),
+            Node::new(Some(pkg), foo, fqn_foo, Flavor::Class).with_location("pkg.py", 1),
+            Node::new(Some(pkg), bar, fqn_bar, Flavor::Function).with_location("pkg.py", 10),
+            Node::new(Some(other), baz, fqn_baz, Flavor::Function).with_location("other.py", 5),
         ];
         let mut defined = FxHashSet::default();
         defined.insert(0);
@@ -856,7 +883,7 @@ mod tests {
             annotated: false,
         };
 
-        VisualGraph::from_call_graph(&nodes_arena, &defined, &defines, &uses, &options)
+        VisualGraph::from_call_graph(&nodes_arena, &defined, &defines, &uses, &options, &interner)
     }
 
     #[test]
@@ -871,9 +898,17 @@ mod tests {
 
     #[test]
     fn test_dot_grouped() {
+        let mut interner = Interner::new();
+        let pkg = interner.intern("pkg");
+        let other = interner.intern("other");
+        let a = interner.intern("A");
+        let b = interner.intern("B");
+        let fqn_a = interner.intern("pkg.A");
+        let fqn_b = interner.intern("other.B");
+
         let nodes_arena = vec![
-            Node::new(Some("pkg"), "A", Flavor::Class).with_location("pkg.py", 1),
-            Node::new(Some("other"), "B", Flavor::Function).with_location("other.py", 5),
+            Node::new(Some(pkg), a, fqn_a, Flavor::Class).with_location("pkg.py", 1),
+            Node::new(Some(other), b, fqn_b, Flavor::Function).with_location("other.py", 5),
         ];
         let mut defined = FxHashSet::default();
         defined.insert(0);
@@ -893,6 +928,7 @@ mod tests {
             &FxHashMap::default(),
             &FxHashMap::default(),
             &options,
+            &interner,
         );
         let dot = write_dot(&g, &[]);
         assert!(dot.contains("subgraph cluster_"));

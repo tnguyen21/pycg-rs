@@ -10,7 +10,7 @@ fn test_modules_found() {
         .nodes_arena
         .iter()
         .filter(|n| n.flavor == pycg_rs::node::Flavor::Module)
-        .map(|n| n.get_name())
+        .map(|n| n.get_name(&cg.interner))
         .collect();
     assert!(
         module_names.iter().any(|n| n.contains("submodule1")),
@@ -29,7 +29,7 @@ fn test_class_found() {
         .nodes_arena
         .iter()
         .filter(|n| n.flavor == pycg_rs::node::Flavor::Class)
-        .map(|n| n.name.clone())
+        .map(|n| cg.interner.resolve(n.name).to_owned())
         .collect();
     assert!(
         classes.contains(&"A".to_string()),
@@ -50,7 +50,7 @@ fn test_function_found() {
                 pycg_rs::node::Flavor::Function | pycg_rs::node::Flavor::Method
             )
         })
-        .map(|n| n.name.clone())
+        .map(|n| cg.interner.resolve(n.name).to_owned())
         .collect();
     assert!(
         functions.contains(&"test_func1".to_string()),
@@ -101,6 +101,7 @@ fn test_dot_output_valid() {
         &cg.defines_edges,
         &cg.uses_edges,
         &opts,
+        &cg.interner,
     );
     let dot = writer::write_dot(&vg, &["rankdir=TB".to_string()]);
     assert!(
@@ -135,6 +136,7 @@ fn test_dot_output_grouped() {
         &cg.defines_edges,
         &cg.uses_edges,
         &opts,
+        &cg.interner,
     );
     let dot = writer::write_dot(&vg, &["rankdir=TB".to_string()]);
     assert!(
@@ -149,7 +151,7 @@ fn test_dot_output_grouped() {
 
 #[test]
 fn test_module_graph() {
-    let cg = make_call_graph(&test_code_dir());
+    let mut cg = make_call_graph(&test_code_dir());
     let (mod_nodes, mod_uses, mod_defined) = cg.derive_module_graph();
 
     // Should have module nodes for analyzed files.
@@ -181,6 +183,7 @@ fn test_module_graph() {
         &pycg_rs::FxHashMap::default(),
         &mod_uses,
         &opts,
+        &cg.interner,
     );
     let dot = writer::write_dot(&vg, &["rankdir=TB".to_string()]);
     assert!(dot.starts_with("digraph G {"));
@@ -207,6 +210,7 @@ fn test_tgf_output_valid() {
         &cg.defines_edges,
         &cg.uses_edges,
         &opts,
+        &cg.interner,
     );
     let tgf = writer::write_tgf(&vg);
     assert!(tgf.contains('#'), "TGF should have # separator");
@@ -236,6 +240,7 @@ fn test_text_output_valid() {
         &cg.defines_edges,
         &cg.uses_edges,
         &opts,
+        &cg.interner,
     );
     let text = writer::write_text(&vg);
     assert!(

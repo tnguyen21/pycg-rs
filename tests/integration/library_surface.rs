@@ -74,12 +74,20 @@ fn test_get_module_name_no_root() {
 
 #[test]
 fn test_node_equality_and_hash() {
+    use pycg_rs::intern::Interner;
     use pycg_rs::node::{Flavor, Node};
     use std::collections::HashSet;
 
-    let a = Node::new(Some("pkg"), "Foo", Flavor::Class);
-    let b = Node::new(Some("pkg"), "Foo", Flavor::Function); // same ns+name, different flavor
-    let c = Node::new(Some("other"), "Foo", Flavor::Class); // different namespace
+    let mut interner = Interner::new();
+    let pkg = interner.intern("pkg");
+    let other = interner.intern("other");
+    let foo = interner.intern("Foo");
+    let fqn_pkg_foo = interner.intern("pkg.Foo");
+    let fqn_other_foo = interner.intern("other.Foo");
+
+    let a = Node::new(Some(pkg), foo, fqn_pkg_foo, Flavor::Class);
+    let b = Node::new(Some(pkg), foo, fqn_pkg_foo, Flavor::Function); // same ns+name, different flavor
+    let c = Node::new(Some(other), foo, fqn_other_foo, Flavor::Class); // different namespace
 
     // PartialEq only checks namespace + name
     assert_eq!(
@@ -97,16 +105,24 @@ fn test_node_equality_and_hash() {
 
 #[test]
 fn test_node_display_and_short_name() {
+    use pycg_rs::intern::Interner;
     use pycg_rs::node::{Flavor, Node};
 
-    let n = Node::new(Some("pkg.sub"), "func", Flavor::Function);
-    assert_eq!(format!("{n}"), "pkg.sub.func");
-    assert_eq!(n.get_short_name(), "func");
-    assert_eq!(n.get_name(), "pkg.sub.func");
+    let mut interner = Interner::new();
+    let pkg_sub = interner.intern("pkg.sub");
+    let func = interner.intern("func");
+    let empty = interner.intern("");
+    let mod_sym = interner.intern("mod");
+    let fqn_func = interner.intern("pkg.sub.func");
 
-    let root = Node::new(Some(""), "mod", Flavor::Module);
-    assert_eq!(root.get_name(), "mod");
-    assert_eq!(root.get_short_name(), "mod");
+    let n = Node::new(Some(pkg_sub), func, fqn_func, Flavor::Function);
+    assert_eq!(n.get_name(&interner), "pkg.sub.func");
+    assert_eq!(n.get_short_name(&interner), "func");
+
+    // ns is empty string, so fqn == name_sym
+    let root = Node::new(Some(empty), mod_sym, mod_sym, Flavor::Module);
+    assert_eq!(root.get_name(&interner), "mod");
+    assert_eq!(root.get_short_name(&interner), "mod");
 }
 
 #[test]
@@ -148,6 +164,7 @@ fn test_dot_output_indent_and_edges() {
         &cg.defines_edges,
         &cg.uses_edges,
         &opts,
+        &cg.interner,
     );
     let dot = writer::write_dot(&vg, &["rankdir=TB".to_string()]);
 
@@ -190,6 +207,7 @@ fn test_tgf_output_structure() {
         &cg.defines_edges,
         &cg.uses_edges,
         &opts,
+        &cg.interner,
     );
     let tgf = writer::write_tgf(&vg);
     let parts: Vec<&str> = tgf.splitn(2, '#').collect();
@@ -226,6 +244,7 @@ fn test_text_output_structure() {
         &cg.defines_edges,
         &cg.uses_edges,
         &opts,
+        &cg.interner,
     );
     let text = writer::write_text(&vg);
     // Should have [U] and [D] tags
@@ -258,6 +277,7 @@ fn test_dot_grouped_subgraph_indent() {
         &cg.defines_edges,
         &cg.uses_edges,
         &opts,
+        &cg.interner,
     );
     let dot = writer::write_dot(&vg, &["rankdir=TB".to_string()]);
     assert!(

@@ -346,7 +346,7 @@ fn test_positional_unpack_correct_class_binding() {
         .filter(|&id| {
             cg.nodes_arena[id]
                 .namespace
-                .as_deref()
+                .map(|ns| cg.interner.resolve(ns))
                 .unwrap_or("")
                 .contains("Alpha")
         })
@@ -377,7 +377,7 @@ fn test_positional_unpack_correct_class_binding() {
         .filter(|&id| {
             cg.nodes_arena[id]
                 .namespace
-                .as_deref()
+                .map(|ns| cg.interner.resolve(ns))
                 .unwrap_or("")
                 .contains("Delta")
         })
@@ -771,7 +771,7 @@ fn has_concrete_uses_edge(cg: &CallGraph, from_name: &str, to_name: &str) -> boo
         if let Some(targets) = cg.uses_edges.get(&fid) {
             for &tid in targets {
                 let n = &cg.nodes_arena[tid];
-                if n.name == to_name && n.namespace.is_some() {
+                if cg.interner.resolve(n.name) == to_name && n.namespace.is_some() {
                     return true;
                 }
             }
@@ -942,7 +942,13 @@ fn test_del_protocol_edges_are_concrete() {
     let cg = make_features_graph();
     // All __delattr__ / __delitem__ nodes must have a non-None namespace.
     for method in ["__delattr__", "__delitem__"] {
-        for &nid in cg.nodes_by_name.get(method).unwrap_or(&vec![]) {
+        let empty = vec![];
+        let nids = cg
+            .interner
+            .lookup(method)
+            .and_then(|sym| cg.nodes_by_name.get(&sym))
+            .unwrap_or(&empty);
+        for &nid in nids {
             assert!(
                 cg.nodes_arena[nid].namespace.is_some(),
                 "del protocol method {method} must resolve to a concrete (non-wildcard) node"
@@ -1037,7 +1043,7 @@ fn test_expand_unknowns_scoped_by_concrete_resolution() {
         .filter(|&id| {
             cg.nodes_arena[id]
                 .namespace
-                .as_deref()
+                .map(|ns| cg.interner.resolve(ns))
                 .unwrap_or("")
                 .contains("WorkerB")
         })

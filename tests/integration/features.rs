@@ -7,7 +7,7 @@ fn test_features_classes_found() {
         .nodes_arena
         .iter()
         .filter(|n| n.flavor == pycg_rs::node::Flavor::Class)
-        .map(|n| n.name.as_str())
+        .map(|n| cg.interner.resolve(n.name))
         .collect();
     for expected in [
         "Decorated",
@@ -208,7 +208,13 @@ fn test_protocol_edges_resolve_to_known_nodes() {
     // non-None namespace (i.e., be concrete, not wildcard).
     let protocol_methods = ["__iter__", "__next__", "__enter__", "__exit__"];
     for method in protocol_methods {
-        for &nid in cg.nodes_by_name.get(method).unwrap_or(&vec![]) {
+        let empty = vec![];
+        let nids = cg
+            .interner
+            .lookup(method)
+            .and_then(|sym| cg.nodes_by_name.get(&sym))
+            .unwrap_or(&empty);
+        for &nid in nids {
             assert!(
                 cg.nodes_arena[nid].namespace.is_some(),
                 "Protocol method {method} resolved to a wildcard node — expected concrete"

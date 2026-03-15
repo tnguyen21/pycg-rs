@@ -220,9 +220,9 @@ fn main() -> Result<()> {
     let (output, should_fail) = match &cli.command {
         Command::Analyze(args) => (run_analyze(args, cli.root.as_deref())?, false),
         Command::SymbolsIn(args) => {
-            run_target_query(&args.files, cli.root.as_deref(), |cg, json_inputs| {
+            run_target_query(&args.files, cli.root.as_deref(), |mut cg, json_inputs| {
                 let response = query::symbols_in(
-                    &cg,
+                    &mut cg,
                     &args.target,
                     infer_target_kind(&args.target, args.target_kind.as_ref()),
                     if args.modules {
@@ -244,9 +244,9 @@ fn main() -> Result<()> {
         Command::Summary(args) => run_target_query(
             &args.target.files,
             cli.root.as_deref(),
-            |cg, json_inputs| {
+            |mut cg, json_inputs| {
                 let response = query::summary(
-                    &cg,
+                    &mut cg,
                     &args.target.target,
                     infer_target_kind(&args.target.target, args.target.target_kind.as_ref()),
                     if args.target.modules {
@@ -267,9 +267,9 @@ fn main() -> Result<()> {
             },
         )?,
         Command::Callees(args) => {
-            run_target_query(&args.files, cli.root.as_deref(), |cg, json_inputs| {
+            run_target_query(&args.files, cli.root.as_deref(), |mut cg, json_inputs| {
                 let response = query::callees(
-                    &cg,
+                    &mut cg,
                     &args.symbol,
                     to_match_mode(&args.r#match),
                     &QueryRenderOptions {
@@ -284,9 +284,9 @@ fn main() -> Result<()> {
             })?
         }
         Command::Callers(args) => {
-            run_target_query(&args.files, cli.root.as_deref(), |cg, json_inputs| {
+            run_target_query(&args.files, cli.root.as_deref(), |mut cg, json_inputs| {
                 let response = query::callers(
-                    &cg,
+                    &mut cg,
                     &args.symbol,
                     to_match_mode(&args.r#match),
                     &QueryRenderOptions {
@@ -301,9 +301,9 @@ fn main() -> Result<()> {
             })?
         }
         Command::Neighbors(args) => {
-            run_target_query(&args.files, cli.root.as_deref(), |cg, json_inputs| {
+            run_target_query(&args.files, cli.root.as_deref(), |mut cg, json_inputs| {
                 let response = query::neighbors(
-                    &cg,
+                    &mut cg,
                     &args.symbol,
                     to_match_mode(&args.r#match),
                     &QueryRenderOptions {
@@ -318,9 +318,9 @@ fn main() -> Result<()> {
             })?
         }
         Command::Path(args) => {
-            run_target_query(&args.files, cli.root.as_deref(), |cg, json_inputs| {
+            run_target_query(&args.files, cli.root.as_deref(), |mut cg, json_inputs| {
                 let response = query::path(
-                    &cg,
+                    &mut cg,
                     &args.source,
                     &args.target,
                     to_match_mode(&args.r#match),
@@ -384,7 +384,7 @@ fn run_analyze(args: &AnalyzeArgs, root: Option<&str>) -> Result<String> {
     };
 
     eprintln!("Analyzing {} Python files...", files.len());
-    let cg = CallGraph::new(&files, root)?;
+    let mut cg = CallGraph::new(&files, root)?;
 
     let options = VisualOptions {
         draw_defines,
@@ -409,6 +409,7 @@ fn run_analyze(args: &AnalyzeArgs, root: Option<&str>) -> Result<String> {
                     analysis_root: root,
                     inputs: &json_inputs,
                 },
+                &cg.interner,
             )
         } else {
             writer::write_json(
@@ -422,6 +423,7 @@ fn run_analyze(args: &AnalyzeArgs, root: Option<&str>) -> Result<String> {
                     analysis_root: root,
                     inputs: &json_inputs,
                 },
+                &cg.interner,
             )
         }
     } else {
@@ -440,6 +442,7 @@ fn run_analyze(args: &AnalyzeArgs, root: Option<&str>) -> Result<String> {
                 &pycg_rs::FxHashMap::default(),
                 &mod_uses,
                 &mod_options,
+                &cg.interner,
             )
         } else {
             VisualGraph::from_call_graph(
@@ -448,6 +451,7 @@ fn run_analyze(args: &AnalyzeArgs, root: Option<&str>) -> Result<String> {
                 &cg.defines_edges,
                 &cg.uses_edges,
                 &options,
+                &cg.interner,
             )
         };
 

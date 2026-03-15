@@ -95,7 +95,7 @@ fn build_graph(case: &AccuracyCase) -> CallGraph {
 
 fn matches_node(cg: &CallGraph, node_id: usize, expected: &str, matcher: MatchKind) -> bool {
     let node = &cg.nodes_arena[node_id];
-    let full_name = node.get_name();
+    let full_name = node.get_name(&cg.interner);
     let short_name = full_name.rsplit('.').next().unwrap_or(&full_name);
     match matcher {
         MatchKind::Short => short_name == expected,
@@ -137,7 +137,7 @@ fn evaluate_expectation(cg: &CallGraph, expectation: &AccuracyExpectation) -> Ex
 
     let mut matched_target_names: Vec<String> = matched_target_ids
         .into_iter()
-        .map(|target_id| cg.nodes_arena[target_id].get_name())
+        .map(|target_id| cg.nodes_arena[target_id].get_name(&cg.interner).to_string())
         .collect();
     matched_target_names.sort();
 

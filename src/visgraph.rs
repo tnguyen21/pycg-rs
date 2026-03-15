@@ -3,6 +3,7 @@
 //! Converts the raw call graph (node arena + edge maps) into [`VisualGraph`],
 //! which writers can render to DOT, TGF, plain text, etc.
 
+use crate::intern::Interner;
 use crate::node::{Node, NodeId};
 use crate::{FxHashMap, FxHashSet};
 use std::collections::BTreeMap;
@@ -117,12 +118,12 @@ impl Colorizer {
     }
 
     /// Return `(group_index, fill_rgba_hex, text_rgb_hex)` for the given node.
-    pub fn make_colors(&mut self, node: &Node) -> (usize, String, String) {
+    pub fn make_colors(&mut self, node: &Node, interner: &Interner) -> (usize, String, String) {
         let idx = self.node_to_idx(node);
 
         if self.colored {
             let h = self.hues[idx];
-            let level = get_level(node);
+            let level = get_level(node, interner);
             let l = (1.0 - 0.1 * level as f64).max(0.1);
             let s = 1.0;
             let a = 0.7;
@@ -148,9 +149,16 @@ impl Colorizer {
 
 /// Compute the nesting level of a node: number of dots in the namespace + 1,
 /// or 0 if the namespace is empty / absent.
-fn get_level(node: &Node) -> usize {
-    match &node.namespace {
-        Some(ns) if !ns.is_empty() => 1 + ns.chars().filter(|&c| c == '.').count(),
+fn get_level(node: &Node, interner: &Interner) -> usize {
+    match node.namespace {
+        Some(ns) => {
+            let ns_str = interner.resolve(ns);
+            if !ns_str.is_empty() {
+                1 + ns_str.chars().filter(|&c| c == '.').count()
+            } else {
+                0
+            }
+        }
         _ => 0,
     }
 }
@@ -244,13 +252,18 @@ impl VisualGraph {
         defines_edges: &FxHashMap<NodeId, FxHashSet<NodeId>>,
         uses_edges: &FxHashMap<NodeId, FxHashSet<NodeId>>,
         options: &VisualOptions,
+        interner: &Interner,
     ) -> Self {
         // 1. Collect defined nodes sorted by (namespace, name).
         let mut sorted_ids: Vec<NodeId> = defined.iter().copied().collect();
         sorted_ids.sort_by(|&a, &b| {
             let na = &nodes_arena[a];
             let nb = &nodes_arena[b];
-            (&na.namespace, &na.name).cmp(&(&nb.namespace, &nb.name))
+            let ns_a = na.namespace.map(|s| interner.resolve(s));
+            let ns_b = nb.namespace.map(|s| interner.resolve(s));
+            let name_a = interner.resolve(na.name);
+            let name_b = interner.resolve(nb.name);
+            (ns_a, name_a).cmp(&(ns_b, name_b))
         });
 
         // 2. Count distinct filenames for the colorizer.
@@ -272,37 +285,39 @@ impl VisualGraph {
         let labeler: Box<dyn Fn(&Node) -> String> = if options.annotated {
             if options.grouped {
                 Box::new(|n: &Node| {
-                    if get_level(n) >= 1
+                    let name = interner.resolve(n.name);
+                    if get_level(n, interner) >= 1
                         && let (Some(fname), Some(line)) = (&n.filename, n.line)
                     {
-                        return format!("{}\\n({}:{})", n.name, fname, line);
+                        return format!("{name}\\n({}:{})", fname, line);
                     }
-                    n.name.clone()
+                    name.to_owned()
                 })
             } else {
                 Box::new(|n: &Node| {
-                    if get_level(n) >= 1 {
+                    let name = interner.resolve(n.name);
+                    if get_level(n, interner) >= 1 {
                         if let (Some(fname), Some(line)) = (&n.filename, n.line) {
-                            let ns = n.namespace.as_deref().unwrap_or("");
+                            let ns = n.namespace.map(|s| interner.resolve(s)).unwrap_or("");
                             return format!(
-                                "{}\\n\\n({}:{},\\n{} in {})",
-                                n.name, fname, line, n.flavor, ns
+                                "{name}\\n\\n({}:{},\\n{} in {})",
+                                fname, line, n.flavor, ns
                             );
                         }
-                        let ns = n.namespace.as_deref().unwrap_or("");
-                        return format!("{}\\n\\n({} in {})", n.name, n.flavor, ns);
+                        let ns = n.namespace.map(|s| interner.resolve(s)).unwrap_or("");
+                        return format!("{name}\\n\\n({} in {})", n.flavor, ns);
                     }
-                    n.name.clone()
+                    name.to_owned()
                 })
             }
         } else {
-            Box::new(|n: &Node| n.get_short_name().to_string())
+            Box::new(|n: &Node| n.get_short_name(interner).to_string())
         };
 
         for &node_id in &sorted_ids {
             let node = &nodes_arena[node_id];
-            let (group, fill_color, text_color) = colorizer.make_colors(node);
-            let safe_id = make_safe_label(&node.get_name());
+            let (group, fill_color, text_color) = colorizer.make_colors(node, interner);
+            let safe_id = make_safe_label(&node.get_name(interner));
             let label = labeler(node);
 
             let vis_idx = all_nodes.len();
@@ -316,7 +331,10 @@ impl VisualGraph {
             });
             id_to_vis_idx.insert(node_id, vis_idx);
 
-            let ns_key = node.namespace.clone().unwrap_or_default();
+            let ns_key = node
+                .namespace
+                .map(|s| interner.resolve(s).to_owned())
+                .unwrap_or_default();
             ns_to_indices.entry(ns_key).or_default().push(vis_idx);
         }
 
@@ -461,6 +479,7 @@ impl VisualGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::intern::Interner;
     use crate::node::Flavor;
 
     #[test]
@@ -499,22 +518,34 @@ mod tests {
 
     #[test]
     fn test_colorizer_uncolored() {
+        let mut interner = Interner::new();
+        let ns = interner.intern("ns");
+        let name = interner.intern("f");
+        let fqn = interner.intern("ns.f");
         let mut c = Colorizer::new(3, false);
-        let node = Node::new(Some("ns"), "f", Flavor::Function);
-        let (_, fill, text) = c.make_colors(&node);
+        let node = Node::new(Some(ns), name, fqn, Flavor::Function);
+        let (_, fill, text) = c.make_colors(&node, &interner);
         assert_eq!(fill, rgba_hex(1.0, 1.0, 1.0, 0.7));
         assert_eq!(text, "#000000");
     }
 
     #[test]
     fn test_colorizer_wraps() {
+        let mut interner = Interner::new();
+        let ns = interner.intern("ns");
+        let a = interner.intern("a");
+        let b = interner.intern("b");
+        let c_name = interner.intern("c");
+        let fqn_a = interner.intern("ns.a");
+        let fqn_b = interner.intern("ns.b");
+        let fqn_c = interner.intern("ns.c");
         let mut c = Colorizer::new(2, true);
-        let n1 = Node::new(Some("ns"), "a", Flavor::Function).with_location("file1.py", 1);
-        let n2 = Node::new(Some("ns"), "b", Flavor::Function).with_location("file2.py", 1);
-        let n3 = Node::new(Some("ns"), "c", Flavor::Function).with_location("file3.py", 1);
-        let (i1, _, _) = c.make_colors(&n1);
-        let (i2, _, _) = c.make_colors(&n2);
-        let (i3, _, _) = c.make_colors(&n3);
+        let n1 = Node::new(Some(ns), a, fqn_a, Flavor::Function).with_location("file1.py", 1);
+        let n2 = Node::new(Some(ns), b, fqn_b, Flavor::Function).with_location("file2.py", 1);
+        let n3 = Node::new(Some(ns), c_name, fqn_c, Flavor::Function).with_location("file3.py", 1);
+        let (i1, _, _) = c.make_colors(&n1, &interner);
+        let (i2, _, _) = c.make_colors(&n2, &interner);
+        let (i3, _, _) = c.make_colors(&n3, &interner);
         assert_eq!(i1, 0);
         assert_eq!(i2, 1);
         assert_eq!(i3, 0); // wrapped
@@ -522,9 +553,15 @@ mod tests {
 
     #[test]
     fn test_from_call_graph_basic() {
+        let mut interner = Interner::new();
+        let pkg = interner.intern("pkg");
+        let a = interner.intern("A");
+        let b = interner.intern("B");
+        let fqn_a = interner.intern("pkg.A");
+        let fqn_b = interner.intern("pkg.B");
         let nodes_arena = vec![
-            Node::new(Some("pkg"), "A", Flavor::Class).with_location("pkg.py", 1),
-            Node::new(Some("pkg"), "B", Flavor::Function).with_location("pkg.py", 10),
+            Node::new(Some(pkg), a, fqn_a, Flavor::Class).with_location("pkg.py", 1),
+            Node::new(Some(pkg), b, fqn_b, Flavor::Function).with_location("pkg.py", 10),
         ];
         let mut defined = FxHashSet::default();
         defined.insert(0);
@@ -547,6 +584,7 @@ mod tests {
             &FxHashMap::default(),
             &uses_edges,
             &options,
+            &interner,
         );
 
         assert_eq!(vg.nodes.len(), 2);
@@ -557,9 +595,16 @@ mod tests {
 
     #[test]
     fn test_from_call_graph_grouped() {
+        let mut interner = Interner::new();
+        let pkg = interner.intern("pkg");
+        let other = interner.intern("other");
+        let a = interner.intern("A");
+        let b = interner.intern("B");
+        let fqn_a = interner.intern("pkg.A");
+        let fqn_b = interner.intern("other.B");
         let nodes_arena = vec![
-            Node::new(Some("pkg"), "A", Flavor::Class).with_location("pkg.py", 1),
-            Node::new(Some("other"), "B", Flavor::Function).with_location("other.py", 5),
+            Node::new(Some(pkg), a, fqn_a, Flavor::Class).with_location("pkg.py", 1),
+            Node::new(Some(other), b, fqn_b, Flavor::Function).with_location("other.py", 5),
         ];
         let mut defined = FxHashSet::default();
         defined.insert(0);
@@ -579,6 +624,7 @@ mod tests {
             &FxHashMap::default(),
             &FxHashMap::default(),
             &options,
+            &interner,
         );
 
         assert!(vg.grouped);
@@ -590,8 +636,12 @@ mod tests {
 
     #[test]
     fn test_from_call_graph_grouped_annotated_labels_include_locations() {
+        let mut interner = Interner::new();
+        let pkg = interner.intern("pkg");
+        let a = interner.intern("A");
+        let fqn_a = interner.intern("pkg.A");
         let nodes_arena =
-            vec![Node::new(Some("pkg"), "A", Flavor::Class).with_location("pkg.py", 7)];
+            vec![Node::new(Some(pkg), a, fqn_a, Flavor::Class).with_location("pkg.py", 7)];
         let defined = FxHashSet::from_iter([0]);
 
         let options = VisualOptions {
@@ -608,6 +658,7 @@ mod tests {
             &FxHashMap::default(),
             &FxHashMap::default(),
             &options,
+            &interner,
         );
 
         let label = &vg.subgraphs[0].nodes[0].label;

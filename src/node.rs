@@ -1,4 +1,4 @@
-use std::fmt;
+use crate::intern::{Interner, SymId};
 
 /// The flavor (kind) of a graph node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -37,8 +37,8 @@ impl Flavor {
     }
 }
 
-impl fmt::Display for Flavor {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for Flavor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Flavor::Unspecified => "unspecified",
             Flavor::Unknown => "unknown",
@@ -61,9 +61,11 @@ impl fmt::Display for Flavor {
 #[derive(Debug, Clone)]
 pub struct Node {
     /// The namespace (dotted path) this node belongs to, or None for wildcard.
-    pub namespace: Option<String>,
+    pub namespace: Option<SymId>,
     /// The short name of this node.
-    pub name: String,
+    pub name: SymId,
+    /// Cached fully-qualified name ("namespace.name"), interned once at creation.
+    pub fqn: SymId,
     /// The flavor of this node.
     pub flavor: Flavor,
     /// The filename where this node is defined.
@@ -73,10 +75,11 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(namespace: Option<&str>, name: &str, flavor: Flavor) -> Self {
+    pub fn new(namespace: Option<SymId>, name: SymId, fqn: SymId, flavor: Flavor) -> Self {
         Self {
-            namespace: namespace.map(|s| s.to_string()),
-            name: name.to_string(),
+            namespace,
+            name,
+            fqn,
             flavor,
             filename: None,
             line: None,
@@ -89,23 +92,14 @@ impl Node {
         self
     }
 
-    /// Get the fully qualified name: "namespace.name" or just "name" if no namespace.
-    pub fn get_name(&self) -> String {
-        match &self.namespace {
-            Some(ns) if !ns.is_empty() => format!("{ns}.{}", self.name),
-            _ => self.name.clone(),
-        }
+    /// Get the fully qualified name — zero allocation, just a lookup.
+    pub fn get_name<'a>(&self, interner: &'a Interner) -> &'a str {
+        interner.resolve(self.fqn)
     }
 
     /// Get the short name for display.
-    pub fn get_short_name(&self) -> &str {
-        &self.name
-    }
-}
-
-impl fmt::Display for Node {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.get_name())
+    pub fn get_short_name<'a>(&self, interner: &'a Interner) -> &'a str {
+        interner.resolve(self.name)
     }
 }
 

@@ -5,11 +5,6 @@ impl AnalysisSession {
     // Attribute access and value resolution
     // =====================================================================
 
-    /// Resolve an attribute chain: `obj.attr` -> (obj_node_id, attr_name).
-    ///
-    /// Returns the first possible object node for backward compatibility.
-    /// Call sites that need all possible objects should use
-    /// `get_obj_ids_for_expr` instead.
     pub(super) fn resolve_attribute(&mut self, expr: &ExprAttribute) -> (Option<NodeId>, String) {
         let attr_name = expr.attr.id.to_string();
 
@@ -20,7 +15,7 @@ impl AnalysisSession {
                 if let Some(obj_id) = obj_node
                     && self.nodes_arena[obj_id].namespace.is_some()
                 {
-                    let ns = self.nodes_arena[obj_id].get_name();
+                    let ns = self.nodes_arena[obj_id].get_name(&self.graph.interner);
                     if let Some(val) = self.lookup_in_scope(&ns, &inner_attr_name) {
                         return (Some(val), attr_name);
                     }
@@ -42,7 +37,6 @@ impl AnalysisSession {
         }
     }
 
-    /// Collect all possible NodeIds that an expression can resolve to.
     pub(super) fn get_obj_ids_for_expr(&mut self, expr: &Expr) -> Vec<NodeId> {
         match expr {
             Expr::Name(n) if n.ctx == ExprContext::Load => {
@@ -56,13 +50,15 @@ impl AnalysisSession {
                     if self.nodes_arena[obj_id].namespace.is_none() {
                         continue;
                     }
-                    let ns = self.nodes_arena[obj_id].get_name();
+                    let ns = self.nodes_arena[obj_id].get_name(&self.graph.interner);
                     let values = self.lookup_values_in_scope(&ns, &attr_name);
                     if values.is_empty() {
                         if let Some(mro) = self.mro.get(&obj_id) {
                             for &base_id in mro.iter().skip(1) {
-                                let base_ns = self.nodes_arena[base_id].get_name();
-                                let base_values = self.lookup_values_in_scope(&base_ns, &attr_name);
+                                let base_ns =
+                                    self.nodes_arena[base_id].get_name(&self.graph.interner);
+                                let base_values =
+                                    self.lookup_values_in_scope(&base_ns, &attr_name);
                                 for id in base_values.iter() {
                                     if !results.contains(&id) {
                                         results.push(id);
@@ -118,44 +114,50 @@ impl AnalysisSession {
         }
     }
 
-    /// Look up the first value of a name in a specific scope.
     pub(super) fn lookup_in_scope(&self, ns: &str, name: &str) -> Option<NodeId> {
         self.lookup_values_in_scope(ns, name).first()
     }
 
-    /// Look up all possible values of a name in a specific scope.
     pub(super) fn lookup_values_in_scope(&self, ns: &str, name: &str) -> ValueSet {
-        if let Some(scope) = self.scopes.get(ns)
-            && let Some(vs) = scope.defs.get(name)
-        {
-            return vs.clone();
+        let ns_sym = self.graph.interner.lookup(ns);
+        let name_sym = self.graph.interner.lookup(name);
+        if let (Some(ns_sym), Some(name_sym)) = (ns_sym, name_sym) {
+            if let Some(scope) = self.scopes.get(&ns_sym)
+                && let Some(vs) = scope.defs.get(&name_sym)
+            {
+                return vs.clone();
+            }
         }
         ValueSet::empty()
     }
 
-    /// Look up shallow container facts of a name in a specific scope.
     pub(super) fn lookup_containers_in_scope(&self, ns: &str, name: &str) -> ContainerFacts {
-        if let Some(scope) = self.scopes.get(ns)
-            && let Some(facts) = scope.containers.get(name)
-        {
-            return facts.clone();
+        let ns_sym = self.graph.interner.lookup(ns);
+        let name_sym = self.graph.interner.lookup(name);
+        if let (Some(ns_sym), Some(name_sym)) = (ns_sym, name_sym) {
+            if let Some(scope) = self.scopes.get(&ns_sym)
+                && let Some(facts) = scope.containers.get(&name_sym)
+            {
+                return facts.clone();
+            }
         }
         ContainerFacts::default()
     }
 
-    /// Add an attribute value to the object's scope without overwriting.
     pub(super) fn set_attribute(&mut self, expr: &ExprAttribute, value: Option<NodeId>) -> bool {
         let (obj_node, attr_name) = self.resolve_attribute(expr);
 
         if let Some(obj_id) = obj_node
             && self.nodes_arena[obj_id].namespace.is_some()
         {
-            let ns = self.nodes_arena[obj_id].get_name();
-            if let Some(scope) = self.scopes.get_mut(&ns) {
+            let ns = self.nodes_arena[obj_id].get_name(&self.graph.interner).to_owned();
+            let ns_sym = self.graph.interner.intern(&ns);
+            let attr_sym = self.graph.interner.intern(&attr_name);
+            if let Some(scope) = self.scopes.get_mut(&ns_sym) {
                 if let Some(id) = value {
-                    scope.defs.entry(attr_name).or_default().insert(id);
+                    scope.defs.entry(attr_sym).or_default().insert(id);
                 } else {
-                    scope.defs.entry(attr_name).or_default();
+                    scope.defs.entry(attr_sym).or_default();
                 }
                 return true;
             }
@@ -173,21 +175,23 @@ impl AnalysisSession {
         if let Some(obj_id) = obj_node
             && self.nodes_arena[obj_id].namespace.is_some()
         {
-            let ns = self.nodes_arena[obj_id].get_name();
-            if let Some(scope) = self.scopes.get_mut(&ns) {
+            let ns = self.nodes_arena[obj_id].get_name(&self.graph.interner).to_owned();
+            let ns_sym = self.graph.interner.intern(&ns);
+            let attr_sym = self.graph.interner.intern(&attr_name);
+            if let Some(scope) = self.scopes.get_mut(&ns_sym) {
                 if !value.values.is_empty() {
                     scope
                         .defs
-                        .entry(attr_name.clone())
+                        .entry(attr_sym)
                         .or_default()
                         .union_with(&value.values);
                 } else {
-                    scope.defs.entry(attr_name.clone()).or_default();
+                    scope.defs.entry(attr_sym).or_default();
                 }
                 if !value.containers.is_empty() {
                     scope
                         .containers
-                        .entry(attr_name)
+                        .entry(attr_sym)
                         .or_default()
                         .union_with(&value.containers);
                 }
@@ -211,7 +215,7 @@ impl AnalysisSession {
                         continue;
                     }
 
-                    let ns = self.nodes_arena[obj_id].get_name();
+                    let ns = self.nodes_arena[obj_id].get_name(&self.graph.interner);
                     let attr_name = node.attr.id.to_string();
                     let direct_values = self.lookup_values_in_scope(&ns, &attr_name);
                     let direct_containers = self.lookup_containers_in_scope(&ns, &attr_name);
@@ -219,8 +223,10 @@ impl AnalysisSession {
                     if direct_values.is_empty() && direct_containers.is_empty() {
                         if let Some(mro) = self.mro.get(&obj_id) {
                             for &base_id in mro.iter().skip(1) {
-                                let base_ns = self.nodes_arena[base_id].get_name();
-                                let base_values = self.lookup_values_in_scope(&base_ns, &attr_name);
+                                let base_ns =
+                                    self.nodes_arena[base_id].get_name(&self.graph.interner);
+                                let base_values =
+                                    self.lookup_values_in_scope(&base_ns, &attr_name);
                                 let base_containers =
                                     self.lookup_containers_in_scope(&base_ns, &attr_name);
                                 if !base_values.is_empty() || !base_containers.is_empty() {
@@ -316,12 +322,6 @@ impl AnalysisSession {
     // Builtins and inheritance resolution
     // =====================================================================
 
-    /// Resolve a call expression to a known builtin result.
-    ///
-    /// Handles:
-    /// - `super()` -> resolve to parent class in MRO
-    /// - `str(x)` / `repr(x)` -> emit `__str__`/`__repr__` protocol edges on x's class;
-    ///   returns `None` because strings are not tracked nodes
     pub(super) fn resolve_builtins_from_call(
         &mut self,
         node: &ExprCall,
@@ -378,7 +378,7 @@ impl AnalysisSession {
             let mut bases = Vec::new();
             let cls_namespace = self.nodes_arena[*cls_id]
                 .namespace
-                .clone()
+                .map(|s| self.graph.interner.resolve(s).to_owned())
                 .unwrap_or_default();
 
             for base_ref in refs {
@@ -426,7 +426,7 @@ impl AnalysisSession {
 
         let mut current = self.get_value(&parts[0])?;
         for part in parts.iter().skip(1) {
-            let ns = self.nodes_arena[current].get_name();
+            let ns = self.nodes_arena[current].get_name(&self.graph.interner);
             if let Some(val) = self.lookup_in_scope(&ns, part.as_str()) {
                 current = val;
                 continue;
