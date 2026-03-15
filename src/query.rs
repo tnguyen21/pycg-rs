@@ -244,11 +244,23 @@ struct IncomingEdge {
 }
 
 #[derive(Clone, Serialize)]
+struct SymbolStat {
+    canonical_name: String,
+    kind: String,
+    caller_count: usize,
+    callee_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<Location>,
+}
+
+#[derive(Clone, Serialize)]
 struct SummaryPayload {
     file_count: usize,
     symbol_counts: BTreeMap<String, usize>,
     edge_counts: BTreeMap<String, usize>,
     top_level_symbols: Vec<SymbolRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_stats: Option<Vec<SymbolStat>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -412,6 +424,28 @@ impl QueryResponse {
                         writeln!(out, "top-level:").unwrap();
                         for symbol in &payload.top_level_symbols {
                             writeln!(out, "  {}", symbol.canonical_name).unwrap();
+                        }
+                    }
+                    if let Some(stats) = &payload.symbol_stats {
+                        let max_name = stats
+                            .iter()
+                            .map(|s| s.canonical_name.len())
+                            .max()
+                            .unwrap_or(0);
+                        let max_kind = stats.iter().map(|s| s.kind.len()).max().unwrap_or(0);
+                        writeln!(out, "symbol stats (by caller count):").unwrap();
+                        for stat in stats {
+                            writeln!(
+                                out,
+                                "  {:<name_w$}  {:<kind_w$}  callers:{}  callees:{}",
+                                stat.canonical_name,
+                                stat.kind,
+                                stat.caller_count,
+                                stat.callee_count,
+                                name_w = max_name,
+                                kind_w = max_kind,
+                            )
+                            .unwrap();
                         }
                     }
                     out
@@ -968,6 +1002,7 @@ pub fn summary(
     target_kind: TargetKind,
     graph_mode: QueryGraphMode,
     render_options: &QueryRenderOptions<'_>,
+    include_stats: bool,
 ) -> QueryResponse {
     match symbols_in(cg, target, target_kind, graph_mode, render_options) {
         QueryResponse(QueryResponseInner::SymbolsIn(QueryDocument::Ok {
@@ -984,12 +1019,13 @@ pub fn summary(
                 }
             }
 
+            let symbol_names: HashSet<String> = payload
+                .iter()
+                .map(|symbol| symbol.canonical_name.clone())
+                .collect();
+
             let mut edge_counts = BTreeMap::new();
             if graph_mode == QueryGraphMode::Symbol {
-                let symbol_names: HashSet<String> = payload
-                    .iter()
-                    .map(|symbol| symbol.canonical_name.clone())
-                    .collect();
                 let incoming_uses = cg
                     .uses_edges
                     .iter()
@@ -1018,6 +1054,47 @@ pub fn summary(
                 edge_counts.insert("outgoing_uses".to_string(), outgoing_uses);
             }
 
+            let symbol_stats = if include_stats && graph_mode == QueryGraphMode::Symbol {
+                let mut caller_counts: HashMap<String, usize> = HashMap::new();
+                let mut callee_counts: HashMap<String, usize> = HashMap::new();
+
+                for (source, targets) in &cg.uses_edges {
+                    let source_name = cg.nodes_arena[*source].get_name();
+                    let source_in_scope = symbol_names.contains(&source_name);
+                    for target_id in targets {
+                        if !cg.defined.contains(target_id) {
+                            continue;
+                        }
+                        let target_name = cg.nodes_arena[*target_id].get_name();
+                        if symbol_names.contains(&target_name) && cg.defined.contains(source) {
+                            *caller_counts.entry(target_name.clone()).or_insert(0) += 1;
+                        }
+                        if source_in_scope {
+                            *callee_counts.entry(source_name.clone()).or_insert(0) += 1;
+                        }
+                    }
+                }
+
+                let mut stats: Vec<SymbolStat> = payload
+                    .iter()
+                    .map(|sym| SymbolStat {
+                        canonical_name: sym.canonical_name.clone(),
+                        kind: sym.kind.clone(),
+                        caller_count: caller_counts.get(&sym.canonical_name).copied().unwrap_or(0),
+                        callee_count: callee_counts.get(&sym.canonical_name).copied().unwrap_or(0),
+                        location: sym.location.clone(),
+                    })
+                    .collect();
+                stats.sort_by(|a, b| {
+                    a.caller_count
+                        .cmp(&b.caller_count)
+                        .then_with(|| a.canonical_name.cmp(&b.canonical_name))
+                });
+                Some(stats)
+            } else {
+                None
+            };
+
             let top_level_symbols: Vec<SymbolRef> = payload
                 .iter()
                 .filter(|symbol| symbol.namespace.as_ref().is_none_or(|ns| !ns.contains('.')))
@@ -1031,6 +1108,7 @@ pub fn summary(
                     symbol_counts,
                     edge_counts,
                     top_level_symbols,
+                    symbol_stats,
                 },
                 diagnostics,
             }))

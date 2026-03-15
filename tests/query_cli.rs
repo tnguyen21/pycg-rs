@@ -351,3 +351,114 @@ fn path_query_text_output_is_human_readable() {
         "expected readable path output, got: {stdout}"
     );
 }
+
+#[test]
+fn summary_stats_json_includes_per_symbol_counts() {
+    let output = run_pycg(&[
+        "summary",
+        "tests/test_code/accuracy_factory.py",
+        "tests/test_code/accuracy_factory.py",
+        "--root",
+        "tests",
+        "--stats",
+        "--format",
+        "json",
+    ])
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let json: Value = serde_json::from_slice(&output).expect("valid json output");
+    validate_schema("pycg-summary-v1.schema.json", &json);
+    let stats = json["summary"]["symbol_stats"]
+        .as_array()
+        .expect("symbol_stats should be present with --stats");
+    assert!(!stats.is_empty(), "symbol_stats should not be empty");
+    for stat in stats {
+        assert!(
+            stat["caller_count"].is_u64(),
+            "caller_count should be integer"
+        );
+        assert!(
+            stat["callee_count"].is_u64(),
+            "callee_count should be integer"
+        );
+        assert!(
+            stat["canonical_name"].is_string(),
+            "canonical_name should be string"
+        );
+        assert!(stat["kind"].is_string(), "kind should be string");
+    }
+    // Verify sorted ascending by caller_count
+    let counts: Vec<u64> = stats
+        .iter()
+        .map(|s| s["caller_count"].as_u64().unwrap())
+        .collect();
+    for window in counts.windows(2) {
+        assert!(
+            window[0] <= window[1],
+            "symbol_stats should be sorted by caller_count ascending, got: {counts:?}"
+        );
+    }
+}
+
+#[test]
+fn summary_stats_module_mode_omits_stats() {
+    let output = run_pycg(&[
+        "summary",
+        "test_code.import_coverage",
+        "tests/test_code/import_coverage",
+        "--root",
+        "tests",
+        "--modules",
+        "--target-kind",
+        "module",
+        "--stats",
+        "--format",
+        "json",
+    ])
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let json: Value = serde_json::from_slice(&output).expect("valid json output");
+    validate_schema("pycg-summary-v1.schema.json", &json);
+    assert!(
+        json["summary"]["symbol_stats"].is_null(),
+        "symbol_stats should be absent in module mode, got: {json:#}"
+    );
+}
+
+#[test]
+fn summary_stats_text_includes_stats_section() {
+    let output = run_pycg(&[
+        "summary",
+        "tests/test_code/accuracy_factory.py",
+        "tests/test_code/accuracy_factory.py",
+        "--root",
+        "tests",
+        "--stats",
+        "--format",
+        "text",
+    ])
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let stdout = String::from_utf8(output).expect("stdout should be utf8");
+    assert!(
+        stdout.contains("symbol stats"),
+        "expected 'symbol stats' section header, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("callers:"),
+        "expected 'callers:' in stats output, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("callees:"),
+        "expected 'callees:' in stats output, got: {stdout}"
+    );
+}

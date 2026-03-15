@@ -123,6 +123,50 @@
           "items": {
             "$ref": "#/$defs/symbol_ref"
           }
+        },
+        "symbol_stats": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/symbol_stat"
+          }
+        }
+      }
+    },
+    "symbol_stat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_name",
+        "kind",
+        "caller_count",
+        "callee_count"
+      ],
+      "properties": {
+        "canonical_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "module",
+            "class",
+            "function",
+            "method",
+            "static_method",
+            "class_method"
+          ]
+        },
+        "caller_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "callee_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "location": {
+          "$ref": "#/$defs/location"
         }
       }
     },

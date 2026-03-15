@@ -37,7 +37,7 @@ struct Cli {
 enum Command {
     Analyze(AnalyzeArgs),
     SymbolsIn(TargetQueryArgs),
-    Summary(TargetQueryArgs),
+    Summary(SummaryArgs),
     Callees(SymbolQueryArgs),
     Callers(SymbolQueryArgs),
     Neighbors(SymbolQueryArgs),
@@ -138,6 +138,16 @@ struct TargetQueryArgs {
 }
 
 #[derive(Args, Clone)]
+struct SummaryArgs {
+    #[command(flatten)]
+    target: TargetQueryArgs,
+
+    /// Include per-symbol caller/callee counts
+    #[arg(long)]
+    stats: bool,
+}
+
+#[derive(Args, Clone)]
 struct SymbolQueryArgs {
     /// Canonical symbol name to query
     symbol: String,
@@ -231,13 +241,15 @@ fn main() -> Result<()> {
                 ))
             })?
         }
-        Command::Summary(args) => {
-            run_target_query(&args.files, cli.root.as_deref(), |cg, json_inputs| {
+        Command::Summary(args) => run_target_query(
+            &args.target.files,
+            cli.root.as_deref(),
+            |cg, json_inputs| {
                 let response = query::summary(
                     &cg,
-                    &args.target,
-                    infer_target_kind(&args.target, args.target_kind.as_ref()),
-                    if args.modules {
+                    &args.target.target,
+                    infer_target_kind(&args.target.target, args.target.target_kind.as_ref()),
+                    if args.target.modules {
                         QueryGraphMode::Module
                     } else {
                         QueryGraphMode::Symbol
@@ -246,13 +258,14 @@ fn main() -> Result<()> {
                         analysis_root: cli.root.as_deref(),
                         inputs: &json_inputs,
                     },
+                    args.stats,
                 );
                 Ok((
-                    render_query_response(&response, &args.common.format),
+                    render_query_response(&response, &args.target.common.format),
                     response.is_error(),
                 ))
-            })?
-        }
+            },
+        )?,
         Command::Callees(args) => {
             run_target_query(&args.files, cli.root.as_deref(), |cg, json_inputs| {
                 let response = query::callees(
