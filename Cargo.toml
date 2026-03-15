@@ -25,6 +25,7 @@ env_logger = "0.11"
 walkdir = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rayon = "1"
 rustc-hash = "2.1.1"
 
 [profile.profiling]

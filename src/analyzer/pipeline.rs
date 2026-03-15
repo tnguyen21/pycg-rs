@@ -1,3 +1,5 @@
+use rayon::prelude::*;
+
 use super::*;
 
 impl CallGraph {
@@ -115,23 +117,39 @@ impl AnalysisSession {
     }
 
     fn prepare_files(&mut self) -> Result<Vec<CachedFile>> {
-        let mut cached_files = Vec::with_capacity(self.filenames.len());
-        for filename in &self.filenames.clone() {
-            let content =
-                std::fs::read_to_string(filename).with_context(|| format!("reading {filename}"))?;
-            let module_name_str = get_module_name(filename, self.root.as_deref());
-            let module_name = self.graph.interner.intern(&module_name_str);
-            let parsed =
-                ruff_python_parser::parse_unchecked(&content, ParseOptions::from(Mode::Module));
+        let root = self.root.clone();
+
+        // Phase 1: read + parse + line_index in parallel (no shared state).
+        let parsed: Result<Vec<_>> = self
+            .filenames
+            .clone()
+            .into_par_iter()
+            .map(|filename| {
+                let content = std::fs::read_to_string(&filename)
+                    .with_context(|| format!("reading {filename}"))?;
+                let module_name_str = get_module_name(&filename, root.as_deref());
+                let parsed = ruff_python_parser::parse_unchecked(
+                    &content,
+                    ParseOptions::from(Mode::Module),
+                );
+                let line_index = LineIndex::from_source_text(&content);
+                Ok((filename, module_name_str, parsed, line_index))
+            })
+            .collect();
+        let parsed = parsed?;
+
+        // Phase 2: intern + build_scopes sequentially (needs &mut Interner).
+        let mut cached_files = Vec::with_capacity(parsed.len());
+        for (filename, module_name_str, parsed, line_index) in parsed {
             let module = match parsed.into_syntax() {
                 Mod::Module(module) => module,
                 _ => continue,
             };
-            let line_index = LineIndex::from_source_text(&content);
+            let module_name = self.graph.interner.intern(&module_name_str);
             let scopes = Self::build_scopes(&module, &module_name_str, &mut self.graph.interner);
-            let filename_sym = self.graph.interner.intern(filename);
+            let filename_sym = self.graph.interner.intern(&filename);
             cached_files.push(CachedFile {
-                filename: filename.clone(),
+                filename,
                 filename_sym,
                 module_name,
                 module,
