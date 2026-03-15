@@ -397,10 +397,9 @@ impl AnalysisSession {
                     // Track return value for the enclosing function/method.
                     // Skip argument sentinels and unknown wildcard nodes —
                     // they don't carry useful type information.
+                    let sentinel = self.graph.interner.intern("^^^argument^^^");
                     for ret_id in ret_ids {
-                        let name_str =
-                            self.graph.interner.resolve(self.nodes_arena[ret_id].name);
-                        let is_sentinel = name_str.contains("^^^argument^^^");
+                        let is_sentinel = self.nodes_arena[ret_id].name == sentinel;
                         let is_unknown = self.nodes_arena[ret_id].namespace.is_none();
                         if !is_sentinel && !is_unknown {
                             let fn_node = self.get_node_of_current_namespace();

@@ -246,8 +246,8 @@ impl AnalysisSession {
             return;
         }
 
-        let to_name_str = self.nodes_arena[to_id].get_name(&self.graph.interner);
-        if to_name_str.contains("^^^argument^^^") || to_id == from_id {
+        let sentinel = self.graph.interner.intern("^^^argument^^^");
+        if self.nodes_arena[to_id].name == sentinel || to_id == from_id {
             return;
         }
 
