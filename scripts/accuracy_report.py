@@ -60,7 +60,7 @@ def run_pycg_json(
     files: list[str],
     root: str | None,
 ) -> dict[str, Any]:
-    cmd = [*pycg_cmd, *files, "--format", "json"]
+    cmd = [*pycg_cmd, "analyze", *files, "--format", "json"]
     if root:
         cmd.extend(["--root", root])
 

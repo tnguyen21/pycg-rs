@@ -31,25 +31,25 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Count tests
-        id: test_count
-        run: |
-          count=$(cargo test --all-targets -- --list | grep -c ': test$')
-          echo "count=$count" >> "$GITHUB_OUTPUT"
-
       - name: Build release binary
         run: cargo build --release
 
       - name: Run tests
         run: cargo test --all-targets
 
-      - name: Bootstrap corpora
-        run: ./scripts/bootstrap-corpora.sh --only-corpora
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Run accuracy check
+        run: |
+          python scripts/accuracy_report.py \
+            --pycg ./target/release/pycg \
+            --out report/accuracy.json
+
+      - name: Bootstrap corpora
+        run: ./scripts/bootstrap-corpora.sh --only-corpora
 
       - name: Generate report
         run: |
@@ -57,7 +57,7 @@ jobs:
             --pycg ./target/release/pycg \
             --corpora benchmarks/corpora \
             --out report/index.html \
-            --test-count "${{ steps.test_count.outputs.count }}" \
+            --accuracy-json report/accuracy.json \
             --commit "${{ github.sha }}"
 
       - name: Upload pages artifact
