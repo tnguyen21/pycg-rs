@@ -1147,6 +1147,159 @@
           "present": false
         }
       ]
+    },
+
+    {
+      "id": "precision.branch_join_no_third_class",
+      "category": "precision",
+      "files": ["tests/test_code/accuracy_precision_extra.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "pick_color",
+          "target": "test_code.accuracy_precision_extra.Red.color",
+          "target_match": "concrete_full",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "pick_color",
+          "target": "test_code.accuracy_precision_extra.Blue.color",
+          "target_match": "concrete_full",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "pick_color",
+          "target": "test_code.accuracy_precision_extra.Green.color",
+          "target_match": "concrete_full",
+          "present": false
+        }
+      ]
+    },
+    {
+      "id": "precision.diamond_mro",
+      "category": "precision",
+      "files": ["tests/test_code/accuracy_precision_extra.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "call_diamond_act",
+          "target": "test_code.accuracy_precision_extra.Left.act",
+          "target_match": "concrete_full",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "call_diamond_act",
+          "target": "test_code.accuracy_precision_extra.Right.act",
+          "target_match": "concrete_full",
+          "present": false
+        },
+        {
+          "kind": "uses",
+          "source": "call_diamond_act",
+          "target": "test_code.accuracy_precision_extra.Base.act",
+          "target_match": "concrete_full",
+          "present": false
+        }
+      ]
+    },
+    {
+      "id": "precision.inherited_method_isolation",
+      "category": "precision",
+      "files": ["tests/test_code/accuracy_precision_extra.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "call_bird_breathe",
+          "target": "test_code.accuracy_precision_extra.Animal.breathe",
+          "target_match": "concrete_full",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "call_bird_breathe",
+          "target": "test_code.accuracy_precision_extra.Fish.swim",
+          "target_match": "concrete_full",
+          "present": false
+        }
+      ]
+    },
+    {
+      "id": "precision.override_respects_child",
+      "category": "precision",
+      "files": ["tests/test_code/accuracy_precision_extra.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "call_fish_swim",
+          "target": "test_code.accuracy_precision_extra.Fish.swim",
+          "target_match": "concrete_full",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "call_fish_swim",
+          "target": "test_code.accuracy_precision_extra.Animal.swim",
+          "target_match": "concrete_full",
+          "present": false
+        }
+      ]
+    },
+    {
+      "id": "precision.nested_scope_isolation",
+      "category": "precision",
+      "files": ["tests/test_code/accuracy_precision_extra.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "unrelated_caller",
+          "target": "outer_with_helper",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "unrelated_caller",
+          "target": "_helper",
+          "present": false
+        }
+      ]
+    },
+    {
+      "id": "precision.factory_return_type_isolation",
+      "category": "precision",
+      "files": ["tests/test_code/accuracy_precision_extra.py"],
+      "expectations": [
+        {
+          "kind": "uses",
+          "source": "use_foo",
+          "target": "test_code.accuracy_precision_extra.Foo.method",
+          "target_match": "concrete_full",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "use_foo",
+          "target": "test_code.accuracy_precision_extra.Bar.method",
+          "target_match": "concrete_full",
+          "present": false
+        },
+        {
+          "kind": "uses",
+          "source": "use_bar",
+          "target": "test_code.accuracy_precision_extra.Bar.method",
+          "target_match": "concrete_full",
+          "present": true
+        },
+        {
+          "kind": "uses",
+          "source": "use_bar",
+          "target": "test_code.accuracy_precision_extra.Foo.method",
+          "target_match": "concrete_full",
+          "present": false
+        }
+      ]
     }
   ]
 }
