@@ -96,7 +96,7 @@ when stuffed with irrelevant source files. The practical question is always
 Call graphs answer this structurally. Given a function you want to change, the
 graph tells you what it calls, what calls it, and the shortest dependency path
 between any two symbols. This turns "find all code related to X" from a
-grep-and-hope exercise into a precise, bounded query.
+grep-and-search exercise into a precise, bounded query.
 </p>
 
 <p>
@@ -109,12 +109,6 @@ be in the result.
 </p>
 
 <p>
-Speed matters because the tool runs inside the editing loop. At 34 ms on a
-small package and under 200 ms on most real codebases, pycg-rs is fast enough to
-invoke on every prompt. You call it live, so the results are never stale.
-</p>
-
-<p>
 Static analysis is not omniscient. Dynamic dispatch, metaprogramming, and
 framework magic will always create blind spots. The right response is not to
 pretend these don't exist, but to surface them: pycg-rs reports external
@@ -122,10 +116,7 @@ references, unresolved names, and ambiguous resolutions as first-class
 diagnostics. An agent that reads the diagnostics can decide when to trust the
 graph and when to fall back to broader search.
 </p>
-
-<p>
-The graph doesn't replace reading code. It tells you <em>which</em> code to read.
-</p>"""
+"""
 
 # ---------------------------------------------------------------------------
 # Helpers
