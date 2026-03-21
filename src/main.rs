@@ -36,14 +36,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Build a full call graph and render it as DOT, TGF, text, or JSON
-    #[command(
-        after_help = "\
+    #[command(after_help = "\
 Examples:
   pycg analyze src/                              # DOT graph of all .py files under src/
   pycg analyze src/ --format json                # machine-readable JSON
   pycg analyze src/ -m --format dot | dot -Tsvg  # module-level import graph as SVG
-  pycg analyze src/ -d -u -c -g -a               # full-detail visual graph"
-    )]
+  pycg analyze src/ -d -u -c -g -a               # full-detail visual graph")]
     Analyze(AnalyzeArgs),
 
     /// List symbols defined in a file, directory, or module
@@ -79,22 +77,18 @@ Examples:
     Summary(SummaryArgs),
 
     /// List functions called by a given symbol
-    #[command(
-        after_help = "\
+    #[command(after_help = "\
 Examples:
   pycg callees myapp.auth.login src/          # what does login() call?
   pycg callees login src/ --match suffix      # match any symbol ending in \"login\"
-  pycg callees myapp.auth.login src/ --format text"
-    )]
+  pycg callees myapp.auth.login src/ --format text")]
     Callees(SymbolQueryArgs),
 
     /// List functions that call a given symbol
-    #[command(
-        after_help = "\
+    #[command(after_help = "\
 Examples:
   pycg callers myapp.db.connect src/          # who calls connect()?
-  pycg callers connect src/ --match suffix    # match any symbol ending in \"connect\""
-    )]
+  pycg callers connect src/ --match suffix    # match any symbol ending in \"connect\"")]
     Callers(SymbolQueryArgs),
 
     /// List both callers and callees of a given symbol
